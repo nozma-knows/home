@@ -1,0 +1,19 @@
+# Dependencies and build output
+node_modules/
+.next/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local environment and tooling
+.env
+.env.local
+.env.*.local
+.DS_Store
+
+# Conductor workspace context and personal settings
+.context/
+.conductor/settings.local.toml
+
+# Railway
+.railway/

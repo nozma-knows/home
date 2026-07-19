@@ -1,0 +1,14 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = "bun install --frozen-lockfile"
+run_mode = "nonconcurrent"
+
+[scripts.run.dev]
+command = "HOME_WEB_PORT=$CONDUCTOR_PORT HOME_API_PORT=$((CONDUCTOR_PORT + 1)) NEXT_PUBLIC_API_URL=http://localhost:$((CONDUCTOR_PORT + 1)) BETTER_AUTH_URL=http://localhost:$((CONDUCTOR_PORT + 1)) WEB_URL=http://localhost:$CONDUCTOR_PORT bun run dev"
+default = true
+icon = "play"
+
+[scripts.run.check]
+command = "bun run typecheck && bun test"
+icon = "test-tube"

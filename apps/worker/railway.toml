@@ -1,0 +1,10 @@
+"$schema" = "https://railway.com/railway.schema.json"
+
+[build]
+builder = "RAILPACK"
+buildCommand = "bun install --frozen-lockfile && bun run --cwd apps/worker typecheck"
+
+[deploy]
+startCommand = "bun run --cwd apps/worker start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

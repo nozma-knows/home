@@ -1,0 +1,27 @@
+{
+  "name": "@home/root",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run typecheck && bun run --filter '@home/web' build",
+    "check": "biome check .",
+    "check:fix": "biome check --write .",
+    "db:generate": "bun run --cwd packages/db generate",
+    "db:migrate": "bun run --cwd packages/db migrate",
+    "dev": "concurrently --kill-others-on-fail -n web,api,worker -c blue,green,magenta \"bun run --cwd apps/web dev\" \"bun run --cwd apps/api dev\" \"bun run --cwd apps/worker dev\"",
+    "test": "bun test",
+    "typecheck": "bun run --filter '*' typecheck"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.4",
+    "@types/bun": "1.3.14",
+    "concurrently": "10.0.3",
+    "drizzle-kit": "0.31.10",
+    "typescript": "6.0.3"
+  }
+}

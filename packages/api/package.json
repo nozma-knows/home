@@ -1,0 +1,20 @@
+{
+  "name": "@home/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@home/auth": "workspace:*",
+    "hono": "4.12.31"
+  },
+  "devDependencies": {
+    "better-auth": "1.6.23",
+    "typescript": "6.0.3"
+  }
+}

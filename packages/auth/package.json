@@ -1,0 +1,20 @@
+{
+  "name": "@home/auth",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@better-auth/drizzle-adapter": "1.6.23",
+    "@home/db": "workspace:*",
+    "better-auth": "1.6.23"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

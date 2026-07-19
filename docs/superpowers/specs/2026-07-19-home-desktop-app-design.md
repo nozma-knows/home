@@ -1,7 +1,7 @@
 # home — Design Document
 
 **Date:** 2026-07-19
-**Status:** Approved pending final review
+**Status:** Approved
 
 ## What is home?
 
