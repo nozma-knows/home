@@ -3,7 +3,13 @@ import type { EventEmitter } from "node:events";
 
 import { runHostedAgent } from "@home/agent";
 import { createProviderModel, estimateCostUsd, findMemoryDuplicate, resolveModel } from "@home/ai";
-import { decryptCredential, fetchFeed, getConnector } from "@home/connectors";
+import {
+  decryptCredential,
+  encryptCredential,
+  fetchFeed,
+  getConnector,
+  getConnectorCredentials,
+} from "@home/connectors";
 import {
   type DistillSessionJob,
   type EvaluateAutomationEventJob,
@@ -28,7 +34,7 @@ import { z } from "zod";
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
 
-const credentialEncryptionKey = process.env.CREDENTIAL_ENCRYPTION_KEY;
+const credentialEncryptionKey = process.env.CREDENTIAL_ENCRYPTION_KEY ?? "";
 if (!credentialEncryptionKey) throw new Error("CREDENTIAL_ENCRYPTION_KEY is required");
 
 const workerName = process.env.WORKER_NAME ?? "home-worker";
@@ -59,6 +65,75 @@ function jsonPayload(value: unknown): Record<string, unknown> {
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
+async function connectionAccessToken(connection: typeof schema.connections.$inferSelect) {
+  const currentToken = await decryptCredential(
+    connection.encryptedAccessToken,
+    credentialEncryptionKey,
+  );
+  if (!connection.tokenExpiresAt || connection.tokenExpiresAt.getTime() > Date.now() + 60_000) {
+    return currentToken;
+  }
+
+  const connector = getConnector(connection.provider);
+  const credentials = getConnectorCredentials(connection.provider);
+  if (!connection.encryptedRefreshToken || !connector.refreshAccessToken || !credentials) {
+    await database
+      .update(schema.connections)
+      .set({
+        status: "needs_reattention",
+        lastError: "Connection credentials expired; reconnect this provider",
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.connections.id, connection.id));
+    throw new Error("Connection credentials expired; reconnect this provider");
+  }
+
+  const refreshToken = await decryptCredential(
+    connection.encryptedRefreshToken,
+    credentialEncryptionKey,
+  );
+  const refreshed = await connector.refreshAccessToken({ ...credentials, refreshToken });
+  await database
+    .update(schema.connections)
+    .set({
+      encryptedAccessToken: await encryptCredential(refreshed.accessToken, credentialEncryptionKey),
+      ...(refreshed.refreshToken
+        ? {
+            encryptedRefreshToken: await encryptCredential(
+              refreshed.refreshToken,
+              credentialEncryptionKey,
+            ),
+          }
+        : {}),
+      tokenExpiresAt: refreshed.expiresAt,
+      status: "active",
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.connections.id, connection.id));
+  return refreshed.accessToken;
+}
+
+function gmailReplyMetadata(raw: Record<string, unknown>) {
+  const payload = raw.payload;
+  if (!payload || typeof payload !== "object") return {};
+  const headers = (payload as { headers?: unknown }).headers;
+  if (!Array.isArray(headers)) return {};
+  const values = new Map<string, string>();
+  for (const entry of headers) {
+    if (!entry || typeof entry !== "object") continue;
+    const { name, value } = entry as { name?: unknown; value?: unknown };
+    if (typeof name === "string" && typeof value === "string") {
+      values.set(name.toLowerCase(), value);
+    }
+  }
+  const originalSubject = values.get("subject") ?? "home triage";
+  return {
+    ...(values.get("from") ? { to: values.get("from") } : {}),
+    subject: /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`,
+  };
+}
+
 await boss.work<SyncConnectionJob>(JOBS.syncConnection, async (jobs) => {
   for (const job of jobs) {
     const [connection] = await database
@@ -75,10 +150,7 @@ await boss.work<SyncConnectionJob>(JOBS.syncConnection, async (jobs) => {
 
     try {
       const connector = getConnector(connection.provider);
-      const accessToken = await decryptCredential(
-        connection.encryptedAccessToken,
-        credentialEncryptionKey,
-      );
+      const accessToken = await connectionAccessToken(connection);
       const result = await connector.sync({
         accessToken,
         cursor: connection.cursor,
@@ -192,10 +264,7 @@ await boss.work<ExecuteItemActionJob>(JOBS.executeItemAction, async (jobs) => {
 
     try {
       const connector = getConnector(request.connection.provider);
-      const accessToken = await decryptCredential(
-        request.connection.encryptedAccessToken,
-        credentialEncryptionKey,
-      );
+      const accessToken = await connectionAccessToken(request.connection);
       const output = await connector.executeAction(
         request.request.action,
         {
@@ -204,6 +273,7 @@ await boss.work<ExecuteItemActionJob>(JOBS.executeItemAction, async (jobs) => {
           messageId: request.item.externalId,
           threadId: request.item.threadId,
           ...(request.item.raw.channelId ? { channelId: request.item.raw.channelId } : {}),
+          ...(request.item.provider === "gmail" ? gmailReplyMetadata(request.item.raw) : {}),
           ...(request.item.provider === "linear" ? { issueId: request.item.externalId } : {}),
         },
         {

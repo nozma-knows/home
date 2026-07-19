@@ -1,64 +1,87 @@
 # home
 
-`home` is a desktop-first personal command center for work, meetings, AI-assisted tasks,
-automations, and agent sessions. The hosted core runs on Railway; the native desktop shell is
-planned for a later phase.
+`home` is a desktop-first personal command center for connected work, AI-assisted tasks,
+briefings, automations, and local coding sessions. The hosted core runs on Railway at
+[`home.milbo.co`](https://home.milbo.co); the native macOS shell wraps the same web app and adds
+a tray, notifications, push-to-talk, and a permission-gated local coding sidecar.
 
-## Foundation architecture
+## What is included
 
-- `apps/web` — Next.js UI
-- `apps/api` — standalone Hono API and Better Auth server
-- `apps/worker` — pg-boss background worker
-- `packages/api` — typed Hono routes
-- `packages/auth` — Better Auth configuration
-- `packages/db` — Drizzle schema and migrations
-- `packages/ui` — shared UI primitives
+- Google OAuth and passwordless six-digit email sign-in through Resend
+- Gmail, Slack, and Linear OAuth connections, background sync, unified triage, and source actions
+- Hosted OpenAI, Anthropic, and Google agent sessions with model switching, tool transcripts,
+  plans, memory distillation, encrypted API keys, and usage tracking
+- Scheduled morning briefings, RSS feeds, news topics, and optional Tavily search
+- Natural-language automations, manual/scheduled/event triggers, tiered autonomy, approvals,
+  suggestions, an audit trail, skills/slash commands, and an MCP registry
+- Installable PWA plus a Tauri 2 macOS app with tray behavior, native notifications, Option-Space
+  dictation, and local repository sessions with mobile-friendly permission approval
 
-## Local setup
+## Architecture
 
-1. Install Bun 1.3.14 or newer and PostgreSQL with the `vector` extension available.
-2. Copy `.env.example` to `.env.local` and update the values.
-3. Run `bun install`.
-4. Run `bun run db:migrate`.
-5. Run `bun run dev`.
+- `apps/web` — Next.js web app and PWA
+- `apps/api` — Hono API, Better Auth, OAuth callbacks, and sidecar WebSockets
+- `apps/worker` — pg-boss workers for sync, agents, briefings, memory, and automations
+- `apps/desktop` — Tauri 2 native shell
+- `apps/sidecar` — compiled Bun process for local coding sessions
+- `packages/api` — typed Hono routes shared with the web client
+- `packages/auth`, `packages/connectors`, `packages/ai`, `packages/agent`, `packages/core` — domain
+  packages
+- `packages/db` — Drizzle schema and migrations over Railway Postgres/pgvector
 
-The web app defaults to `http://localhost:3000`; the API defaults to
-`http://localhost:3001`. Use `bun run typecheck`, `bun test`, and `bun run build` before
-shipping changes.
+## Local development
 
-See the approved product design in
+Requirements: Bun 1.3.14+, PostgreSQL with the `vector` extension, and Rust when building the
+desktop app.
+
+```sh
+cp .env.example .env.local
+bun install --frozen-lockfile
+bun run db:migrate
+bun run dev
+```
+
+The web app defaults to `http://localhost:3000` and the API to `http://localhost:3001`.
+
+Quality gate:
+
+```sh
+bun run check
+bun test
+bun run build
+```
+
+Native macOS app:
+
+```sh
+bun run --cwd apps/desktop build
+```
+
+The build compiles the sidecar automatically and produces
+`apps/desktop/src-tauri/target/release/bundle/macos/home.app`. Local natural-language coding
+requests use the installed `codex` CLI; exact commands can be sent with a `$ ` prefix. Plan mode
+is read-only, Ask requests approval before mutating commands, and Auto permits them within the
+bound repository.
+
+## Production
+
+Production uses sibling domains:
+
+- Web: `https://home.milbo.co`
+- API, auth callbacks, and WebSockets: `https://home-api.milbo.co`
+
+The Railway services use `apps/web/railway.toml`, `apps/api/railway.toml`, and
+`apps/worker/railway.toml`. The API applies Drizzle migrations before starting. Keep
+`CREDENTIAL_ENCRYPTION_KEY` identical on API and worker; do not rotate it without re-encrypting
+stored connector and AI credentials.
+
+Complete provider callbacks, environment variables, deployment checks, and troubleshooting are
+documented in [`docs/operations.md`](docs/operations.md).
+
+The approved product design and intentionally deferred items live in
 [`docs/superpowers/specs/2026-07-19-home-desktop-app-design.md`](docs/superpowers/specs/2026-07-19-home-desktop-app-design.md).
-
-## Railway
-
-Create three services from this shared Bun monorepo and point each service's config-as-code path
-at `/apps/web/railway.toml`, `/apps/api/railway.toml`, or `/apps/worker/railway.toml`. Attach one
-PostgreSQL service and expose its `DATABASE_URL` to the API and worker. The API pre-deploy command
-applies Drizzle migrations before new code starts.
-
-For production auth, use sibling domains and set:
-
-- `WEB_URL=https://app.example.com`
-- `NEXT_PUBLIC_API_URL=https://api.example.com`
-- `BETTER_AUTH_URL=https://api.example.com`
-- `AUTH_COOKIE_DOMAIN=example.com`
-- `BETTER_AUTH_SECRET` to a high-entropy value of at least 32 characters
-
-For Railway-generated `*.up.railway.app` domains, set `AUTH_CROSS_SITE_COOKIES=true`. This uses
-secure partitioned cross-site cookies. Sibling custom domains remain the preferred production
-configuration, particularly for Safari compatibility.
-
-Authentication is passwordless: users can continue with Google or request a six-digit email code.
-Email codes are delivered through Resend and expire after ten minutes. Configure
-`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL` before using
-the sign-in screen. Google OAuth callbacks use `${BETTER_AUTH_URL}/api/auth/callback/google`.
-
-Organization invitation records are supported in the foundation. Invitation delivery will reuse
-the configured Resend provider in a later phase.
 
 ## Conductor
 
 The shared Conductor setup installs the frozen Bun lockfile and allocates adjacent web/API ports.
-Run mode is intentionally nonconcurrent for now because all local workspaces point at the same
-PostgreSQL database and pg-boss queue. It can switch to concurrent after setup provisions an
-isolated database per workspace.
+Run mode is nonconcurrent because workspaces currently share one local database and pg-boss queue.

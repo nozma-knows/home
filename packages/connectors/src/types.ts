@@ -56,6 +56,11 @@ export interface Connector {
     codeVerifier?: string;
     redirectURI: string;
   }): Promise<OAuthTokens>;
+  refreshAccessToken?(input: {
+    clientId: string;
+    clientSecret: string;
+    refreshToken: string;
+  }): Promise<OAuthTokens>;
   getIdentity(accessToken: string): Promise<ConnectorIdentity>;
   sync(ctx: ConnectorContext): Promise<SyncResult>;
   executeAction(

@@ -94,6 +94,17 @@ export const gmailConnector: Connector = {
       }),
     });
   },
+  refreshAccessToken({ clientId, clientSecret, refreshToken }) {
+    return requestOAuthTokens({
+      endpoint: "https://oauth2.googleapis.com/token",
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    });
+  },
   async getIdentity(accessToken) {
     const profile = await fetchJson<{ email: string; id: string; name?: string }>(
       "https://www.googleapis.com/oauth2/v2/userinfo",
@@ -106,8 +117,11 @@ export const gmailConnector: Connector = {
     };
   },
   async sync({ accessToken, cursor }) {
+    const storedCursor = Number(cursor.receivedAtMs ?? cursor.historyId ?? 0);
     const after =
-      typeof cursor.historyId === "string" ? `after:${cursor.historyId}` : "newer_than:30d";
+      Number.isFinite(storedCursor) && storedCursor > 0
+        ? `after:${Math.floor(storedCursor > 100_000_000_000 ? storedCursor / 1000 : storedCursor)}`
+        : "newer_than:30d";
     const listURL = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
     listURL.search = new URLSearchParams({ maxResults: "30", q: after }).toString();
     const list = await fetchJson<{ messages?: Array<{ id: string }>; resultSizeEstimate?: number }>(
@@ -125,9 +139,9 @@ export const gmailConnector: Connector = {
     const items = messages.map(normalizeMessage).filter((item) => item !== undefined);
     const newest = messages.reduce(
       (maximum, message) => Math.max(maximum, Number(message.internalDate ?? 0)),
-      Number(cursor.historyId ?? 0),
+      storedCursor,
     );
-    return { items, cursor: { historyId: String(newest) } };
+    return { items, cursor: { receivedAtMs: String(newest) } };
   },
   async executeAction(action, input, { accessToken }) {
     const messageId = String(input.messageId ?? input.externalId ?? "");

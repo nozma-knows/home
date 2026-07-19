@@ -4,7 +4,6 @@ import type { NextConfig } from "next";
 const monorepoRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 const nextConfig: NextConfig = {
-  output: "standalone",
   outputFileTracingRoot: monorepoRoot,
   transpilePackages: ["@home/ui"],
   turbopack: {

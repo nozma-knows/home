@@ -109,7 +109,8 @@ export function TriageView() {
       return;
     }
     setReplying(false);
-    await updateStatus(selected.id, "done");
+    setItems((current) => current.filter((item) => item.id !== selected.id));
+    setSelectedIndex((current) => Math.max(0, Math.min(current, items.length - 2)));
   }
 
   return (
