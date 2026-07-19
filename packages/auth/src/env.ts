@@ -16,6 +16,10 @@ export function getAuthEnvironment() {
     baseURL,
     cookieDomain: process.env.AUTH_COOKIE_DOMAIN?.trim() || undefined,
     crossSiteCookies: process.env.AUTH_CROSS_SITE_COOKIES === "true",
+    googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || undefined,
+    googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || undefined,
+    resendApiKey: process.env.RESEND_API_KEY?.trim() || undefined,
+    resendFromEmail: process.env.RESEND_FROM_EMAIL?.trim() || undefined,
     secret,
     trustedOrigins: [webURL, ...additionalOrigins],
   };

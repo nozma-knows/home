@@ -48,8 +48,13 @@ For Railway-generated `*.up.railway.app` domains, set `AUTH_CROSS_SITE_COOKIES=t
 secure partitioned cross-site cookies. Sibling custom domains remain the preferred production
 configuration, particularly for Safari compatibility.
 
-Organization invitation records are supported in the foundation. Delivery email is intentionally
-not configured until an email provider is selected.
+Authentication is passwordless: users can continue with Google or request a six-digit email code.
+Email codes are delivered through Resend and expire after ten minutes. Configure
+`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL` before using
+the sign-in screen. Google OAuth callbacks use `${BETTER_AUTH_URL}/api/auth/callback/google`.
+
+Organization invitation records are supported in the foundation. Invitation delivery will reuse
+the configured Resend provider in a later phase.
 
 ## Conductor
 

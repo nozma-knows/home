@@ -1,8 +1,9 @@
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { getDatabase, schema } from "@home/db";
 import { betterAuth } from "better-auth";
-import { organization } from "better-auth/plugins";
+import { emailOTP, organization } from "better-auth/plugins";
 
+import { sendAuthenticationOTP } from "./email";
 import { getAuthEnvironment } from "./env";
 
 const environment = getAuthEnvironment();
@@ -15,9 +16,17 @@ export const auth = betterAuth({
     provider: "pg",
     schema,
   }),
-  emailAndPassword: {
-    enabled: true,
-  },
+  emailAndPassword: { enabled: false },
+  socialProviders:
+    environment.googleClientId && environment.googleClientSecret
+      ? {
+          google: {
+            clientId: environment.googleClientId,
+            clientSecret: environment.googleClientSecret,
+            prompt: "select_account",
+          },
+        }
+      : {},
   trustedOrigins: environment.trustedOrigins,
   user: {
     modelName: "users",
@@ -31,6 +40,7 @@ export const auth = betterAuth({
   },
   account: {
     modelName: "accounts",
+    encryptOAuthTokens: true,
   },
   verification: {
     modelName: "verifications",
@@ -52,6 +62,25 @@ export const auth = betterAuth({
       : { enabled: false },
   },
   plugins: [
+    emailOTP({
+      allowedAttempts: 5,
+      expiresIn: 10 * 60,
+      otpLength: 6,
+      rateLimit: {
+        max: 3,
+        window: 60,
+      },
+      storeOTP: "hashed",
+      async sendVerificationOTP({ email, otp, type }) {
+        await sendAuthenticationOTP({
+          apiKey: environment.resendApiKey,
+          email,
+          from: environment.resendFromEmail,
+          otp,
+          type,
+        });
+      },
+    }),
     organization({
       membershipLimit: 250,
       schema: {
