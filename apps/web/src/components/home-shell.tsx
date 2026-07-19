@@ -163,7 +163,7 @@ export function HomeShell() {
         </div>
       </aside>
 
-      <section className="px-5 py-6 sm:px-8 lg:px-12 lg:py-10">
+      <section className="px-5 pb-24 pt-6 sm:px-8 lg:px-12 lg:py-10">
         {view === "triage" ? <TriageView /> : null}
         {view === "sessions" ? <SessionsView /> : null}
         {view === "automations" ? <AutomationsView /> : null}
@@ -172,6 +172,25 @@ export function HomeShell() {
         {view === "settings" ? <SettingsView /> : null}
         {view === "briefing" ? <BriefingView firstName={firstName ?? "there"} /> : null}
       </section>
+
+      <nav className="fixed inset-x-0 bottom-0 z-40 flex items-center gap-1 overflow-x-auto border-t border-white/[0.08] bg-zinc-950/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur lg:hidden">
+        {[...navigation, { id: "settings" as const, label: "Settings", icon: Settings }].map(
+          (item) => (
+            <button
+              className={cn(
+                "flex min-w-16 flex-1 flex-col items-center gap-1 rounded-lg px-2 py-1.5 text-[9px]",
+                view === item.id ? "text-emerald-300" : "text-zinc-600",
+              )}
+              key={item.id}
+              onClick={() => selectView(item.id)}
+              type="button"
+            >
+              <item.icon className="size-4" />
+              {item.label}
+            </button>
+          ),
+        )}
+      </nav>
     </main>
   );
 }

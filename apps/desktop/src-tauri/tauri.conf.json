@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "home",
+  "version": "0.1.0",
+  "identifier": "co.milbo.home",
+  "build": {
+    "beforeDevCommand": "bun run --cwd ../web dev",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../../web/public"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "home",
+        "url": "https://home.milbo.co",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 860,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}

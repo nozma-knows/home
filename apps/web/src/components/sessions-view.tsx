@@ -6,6 +6,7 @@ import {
   ChevronDown,
   GitFork,
   LoaderCircle,
+  Mic,
   Paperclip,
   Plus,
   Send,
@@ -60,6 +61,33 @@ type PlanArtifact = {
   updatedAt: string;
 };
 
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+  onresult: ((event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
+  start(): void;
+  stop(): void;
+};
+
+async function notifySessionComplete(title: string) {
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } = await import(
+      "@tauri-apps/plugin-notification"
+    );
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (granted) sendNotification({ title: "home", body: `${title} is ready.` });
+    return;
+  } catch {
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("home", { body: `${title} is ready.` });
+    }
+  }
+}
+
 export function SessionsView() {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
@@ -71,12 +99,54 @@ export function SessionsView() {
   const [error, setError] = useState<string>();
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [plans, setPlans] = useState<PlanArtifact[]>([]);
+  const [listening, setListening] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
+  const recognition = useRef<SpeechRecognitionLike | undefined>(undefined);
+  const previousStatuses = useRef<Record<string, AgentSession["status"]>>({});
 
   const active = sessions.find((session) => session.id === activeId);
   const activeAccount = accounts.find((account) => account.id === active?.providerAccountId);
   const modelOptions = activeAccount ? (models[activeAccount.provider] ?? []) : [];
+
+  const startDictation = useCallback(() => {
+    if (recognition.current && listening) {
+      recognition.current.stop();
+      return;
+    }
+    const SpeechRecognition =
+      (
+        window as typeof window & {
+          SpeechRecognition?: new () => SpeechRecognitionLike;
+          webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+        }
+      ).SpeechRecognition ??
+      (
+        window as typeof window & {
+          webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+        }
+      ).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setError("Speech recognition is not available in this browser.");
+      return;
+    }
+    const instance = new SpeechRecognition();
+    instance.continuous = false;
+    instance.interimResults = false;
+    instance.lang = navigator.language || "en-US";
+    instance.onresult = (event) => {
+      const transcript = event.results[0]?.[0]?.transcript;
+      if (transcript) setMessage((current) => `${current}${current ? " " : ""}${transcript}`);
+    };
+    instance.onend = () => setListening(false);
+    instance.onerror = () => {
+      setListening(false);
+      setError("Speech recognition stopped unexpectedly.");
+    };
+    recognition.current = instance;
+    setListening(true);
+    instance.start();
+  }, [listening]);
 
   const loadSessions = useCallback(async () => {
     const [sessionResponse, accountResponse, modelsResponse, plansResponse] = await Promise.all([
@@ -90,6 +160,15 @@ export function SessionsView() {
       return;
     }
     const nextSessions = (await sessionResponse.json()) as AgentSession[];
+    for (const nextSession of nextSessions) {
+      const previous = previousStatuses.current[nextSession.id];
+      if ((previous === "running" || previous === "queued") && nextSession.status === "idle") {
+        void notifySessionComplete(nextSession.title);
+      }
+    }
+    previousStatuses.current = Object.fromEntries(
+      nextSessions.map((nextSession) => [nextSession.id, nextSession.status]),
+    );
     setSessions(nextSessions);
     setAccounts((await accountResponse.json()) as ProviderAccount[]);
     const catalog = await modelsResponse.json();
@@ -126,6 +205,17 @@ export function SessionsView() {
     }, 1800);
     return () => window.clearInterval(timer);
   }, [activeId, loadEvents, loadSessions]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen("home://push-to-talk", startDictation))
+      .then((dispose) => {
+        unlisten = dispose;
+      })
+      .catch(() => undefined);
+    return () => unlisten?.();
+  }, [startDictation]);
 
   async function createSession() {
     if (!accounts.length) {
@@ -488,6 +578,13 @@ export function SessionsView() {
               variant="ghost"
             >
               <Paperclip className="size-4" />
+            </Button>
+            <Button
+              className={cn("size-9 shrink-0 p-0", listening && "bg-red-400/10 text-red-300")}
+              onClick={startDictation}
+              variant="ghost"
+            >
+              <Mic className={cn("size-4", listening && "animate-pulse")} />
             </Button>
             <textarea
               className="max-h-40 min-h-10 flex-1 resize-none bg-transparent px-1 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-700"

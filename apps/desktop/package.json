@@ -1,0 +1,15 @@
+{
+  "name": "@home/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.1",
+    "typescript": "6.0.3"
+  }
+}

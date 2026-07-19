@@ -8,7 +8,15 @@
     }
   },
   "files": {
-    "includes": ["**", "!!**/.context", "!!**/.next", "!!**/node_modules", "!!packages/db/drizzle"]
+    "includes": [
+      "**",
+      "!!**/.context",
+      "!!**/.next",
+      "!!**/node_modules",
+      "!!**/src-tauri/gen",
+      "!!**/src-tauri/target",
+      "!!packages/db/drizzle"
+    ]
   },
   "css": {
     "parser": {

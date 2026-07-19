@@ -1,0 +1,20 @@
+[package]
+name = "home-desktop"
+version = "0.1.0"
+description = "The desktop shell for home"
+authors = ["home"]
+edition = "2024"
+
+[lib]
+name = "home_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"

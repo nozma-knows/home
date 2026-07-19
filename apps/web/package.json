@@ -11,6 +11,8 @@
   "dependencies": {
     "@home/api": "workspace:*",
     "@home/ui": "workspace:*",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-notification": "^2.3.3",
     "better-auth": "1.6.23",
     "hono": "4.12.31",
     "lucide-react": "1.25.0",
