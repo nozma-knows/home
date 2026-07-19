@@ -22,7 +22,7 @@ Multi-user by design (every row scoped to a user), with organization support: us
 
 1. **Morning briefing** — the home screen. Generated on your schedule (default 7am, per-user timezone): today's meetings, top priorities with reasoning, things waiting on you, things you're blocking, pending approvals, and a capped **News** section (RSS feeds + web-search topics, filtered by your interests and memories). Structured UI, not a wall of text; every element links to its underlying item. Regenerate on demand; briefs are stored and browsable.
 2. **Triage inbox** — one ranked feed of actionable items across Gmail, Slack, and Linear. Ranking = deterministic rules (direct mention > FYI) + cached LLM urgency scores (cheap model, batched at sync time). Actions per item: reply with AI (draft → approve/edit → send), convert to task, snooze, delegate to AI, done/archive. Keyboard-first (j/k navigation, single-key actions).
-3. **Chat hub** — persistent conversations with any connected model. Tools give it real context: `search_items`, `get_schedule`, `create_task`, and connector actions. Outward-facing tool calls render as inline approval cards. Conversations feed the memory distiller.
+3. **Agent sessions** — the chat surface, designed to feel like Claude Code / Conductor / Codex: an agentic loop with a live transcript of messages, streamed tool calls, permission prompts, diffs, and plan artifacts. Two kinds: **chat sessions** over the work graph (Gmail/Slack/Linear, calendar, memory, automations) and **coding sessions** bound to a repo (local execution via the desktop sidecar; see Agent sessions section). Sessions feed the memory distiller.
 
 Later surfaces: Automations editor, Approvals inbox, Memory browser, Usage dashboard, Settings — all specified below.
 
@@ -48,6 +48,10 @@ Later surfaces: Automations editor, Approvals inbox, Memory browser, Usage dashb
 │  Postgres    — app data (Drizzle) + job queue      │
 │                (pg-boss) + vectors (pgvector)      │
 └────────────────────────────────────────────────────┘
+  + Cloudflare R2 (S3-compatible) — attachments
+  + Desktop sidecar (Bun, in Tauri shell) — executes
+    local coding sessions; syncs transcripts to the
+    core over WebSocket
       │ outbound APIs + inbound webhooks
   Gmail / Slack / Linear / RSS / (Calendar, GitHub, …)
   Anthropic / OpenAI / … (LLM providers)
@@ -70,13 +74,14 @@ home/
     web/          Next.js UI (Tailwind + shadcn); no API routes
     api/          Thin server shell: mounts packages/api, Bun.serve()
     worker/       Bun job runner: pg-boss consumer, schedulers
-    desktop/      Tauri 2 shell (Phase 6)
+    desktop/      Tauri 2 shell + Bun sidecar for local coding sessions (Phases 6–7)
   packages/
     api/          Hono routers + exported AppType (typed RPC client)
     db/           Drizzle schema, migrations, query helpers
     core/         Domain logic: automations, briefings, triage, approvals
     connectors/   Provider framework + gmail/ slack/ linear/ rss/
-    ai/           LLM provider abstraction, model registry, memory
+    ai/           LLM provider abstraction, ModelResolver, memory
+    agent/        Model-agnostic agent loop, sessions, permission gates
     ui/           Shared shadcn components, design tokens
 ```
 
@@ -137,7 +142,45 @@ Preferences live in a `model_preferences` table (user-scoped; purpose → provid
 
 **Usage tracking:** every LLM call logged (provider, model, tokens, computed cost, purpose). The log powers the usage dashboard: spend by provider/purpose/day for API-key accounts; token/rate-window consumption for subscription accounts (which have no per-token price).
 
-**Chat:** conversations + messages in Postgres, streamed over the API. Tools: `search_items`, `get_schedule`, `create_task`, connector actions. Outward-facing tool calls route through the approvals gate — chat respects tiered autonomy automatically. Context = retrieved memories + relevant items, never a raw data dump.
+Chat/agent behavior is specified in the **Agent sessions** section below.
+
+## Agent sessions
+
+The chat feature is an agentic system modeled on Claude Code / Conductor / Codex, not request-response chat.
+
+**Session model.** A session has a unified transcript stored in the hosted core (Postgres): messages, streamed tool calls with live progress, permission prompts, diffs, plan artifacts. Kinds:
+
+- **Chat session** — agent over the work graph. Tools: `search_items`, `get_schedule`, `create_task`, memory read/write, connector actions, enabled MCP servers.
+- **Coding session** — bound to a repo + working directory, executed locally by the desktop sidecar.
+
+Because transcripts sync through the core regardless of execution backend, any device (including mobile/PWA) can watch a session, steer it, and answer permission prompts.
+
+**Execution backends** (one interface, per user decision: local-first, cloud later):
+
+- `hosted` — the agent loop runs in `apps/worker`; used by chat sessions; works from any device.
+- `local` — the Tauri desktop shell includes a **Bun sidecar** that executes coding sessions against the user's real repos and streams the transcript to the core over WebSocket; permission prompts round-trip through the core so any device can answer them. Coding requires the desktop to be running.
+- `cloud-sandbox` — future third backend (E2B/Daytona/Fly Machines) for coding from anywhere; the shared session model makes this additive.
+
+**Agent loop:** built on the AI SDK's multi-step tool orchestration — model-agnostic by construction (one loop, one permission system, any provider). Trade-off accepted: Anthropic's Agent SDK offers more off-the-shelf but locks the loop to Claude; it can be added later as a Claude-optimized backend. The loop lives in `packages/agent`, shared by worker and sidecar.
+
+**Model switching:** composer model switcher usable at any time; every message records the model that produced it; transcripts are provider-agnostic so mid-session switches are seamless. Selection feeds level 1 of the `ModelResolver` cascade.
+
+**Session settings** (per-session popover):
+
+- **Effort** — mapped to each provider's reasoning knob (thinking budget / reasoning effort).
+- **Mode** — `plan` / `ask` / `auto`: plan restricts to read-only tools; ask gates every mutating action; auto applies the session's autonomy tier. Modes reuse the tiered-autonomy machinery.
+- **Toolsets** — enable/disable connector toolsets and MCP servers per session.
+
+**Plans as first-class artifacts.** Plan mode produces a structured plan artifact. "Start session from plan" seeds a new session with the plan — with a different model, backend, or session kind — back-linked to its origin. Generic session forking uses the same mechanism.
+
+**MCP registry** (Settings): remote servers (HTTP/SSE, OAuth supported) usable by hosted sessions; local/stdio servers usable by the sidecar; per-session enablement. home's connectors are built-in toolsets; MCP covers the long tail.
+
+**Plugins = skills + slash commands:** user/org-scoped markdown instructions and prompt templates invoked via `/` in the composer (the Claude Code skills model, kept deliberately simple).
+
+**Input:**
+
+- **Speech-to-text:** mic button + global push-to-talk hotkey (Tauri); audio transcribed via an STT model on the user's connected accounts (Whisper-class), Web Speech API as browser fallback.
+- **Attachments:** images/files/video in the composer, stored in S3-compatible object storage (Cloudflare R2 — Railway has no managed object store), passed to models per capability.
 
 ## Memory (`packages/ai/memory`)
 
@@ -196,14 +239,15 @@ Every run writes `automation_runs`: inputs, per-step outputs, outcome — full a
 
 1. **Foundation** — monorepo scaffold; Postgres + Drizzle; BetterAuth (with organization plugin: orgs, `user_organizations`, invites) across `app.`/`api.` subdomains, cookies/CORS proven end-to-end; skeleton of all three services deployed to Railway.
 2. **Connectors + triage** — Gmail/Slack/Linear sync into `items`; triage feed UI; manual actions (reply, archive, snooze).
-3. **AI core** — provider accounts (API keys), chat hub with tools, memory tables + distillation, usage logging.
+3. **Agent sessions (hosted)** — provider accounts (API keys), agent loop in `packages/agent`, chat sessions with work-graph tools, model switcher + session settings (effort/mode/toolsets), attachments (R2), memory tables + distillation, usage logging.
 4. **Briefing** — briefing job + UI; RSS connector; news topics.
-5. **Automations** — engine, tiered autonomy, approvals inbox, NL builder, suggestions.
-6. **Shells** — Tauri desktop (tray, notifications, hotkey); PWA polish for mobile.
+5. **Automations** — engine, tiered autonomy, approvals inbox, NL builder, suggestions; MCP registry + plugins/skills; plan artifacts + session forking.
+6. **Shells** — Tauri desktop (tray, notifications, push-to-talk STT); PWA polish for mobile.
+7. **Coding sessions** — desktop Bun sidecar (`local` backend), repo binding, diffs in transcript, permission round-trips through the core.
 
 ## UI direction
 
-Sidebar app: Briefing / Triage / Chat / Automations / Approvals / Memory / Settings. shadcn/ui components, single accent color, dense-but-calm layout, keyboard-first interactions, dark mode from day one.
+Sidebar app: Briefing / Triage / Sessions / Automations / Approvals / Memory / Settings. shadcn/ui components, single accent color, dense-but-calm layout, keyboard-first interactions, dark mode from day one.
 
 ## Explicitly deferred
 
@@ -212,3 +256,5 @@ Sidebar app: Briefing / Triage / Chat / Automations / Approvals / Memory / Setti
 - Org-sharing UI for connections/automations (schema supports it day one; UI lands with the Automations phase)
 - Subscription OAuth for LLM providers where not officially supported
 - Inngest/Temporal (only if automations outgrow pg-boss)
+- `cloud-sandbox` execution backend for coding from anywhere (E2B/Daytona/Fly Machines)
+- Claude-optimized agent backend via Anthropic's Agent SDK
