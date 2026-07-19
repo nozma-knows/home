@@ -37,6 +37,13 @@ export const auth = betterAuth({
   },
   advanced: {
     cookiePrefix: "home",
+    defaultCookieAttributes: environment.crossSiteCookies
+      ? {
+          sameSite: "none",
+          secure: true,
+          partitioned: true,
+        }
+      : undefined,
     crossSubDomainCookies: environment.cookieDomain
       ? {
           enabled: true,

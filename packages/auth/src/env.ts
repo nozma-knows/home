@@ -15,6 +15,7 @@ export function getAuthEnvironment() {
   return {
     baseURL,
     cookieDomain: process.env.AUTH_COOKIE_DOMAIN?.trim() || undefined,
+    crossSiteCookies: process.env.AUTH_CROSS_SITE_COOKIES === "true",
     secret,
     trustedOrigins: [webURL, ...additionalOrigins],
   };

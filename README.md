@@ -44,6 +44,10 @@ For production auth, use sibling domains and set:
 - `AUTH_COOKIE_DOMAIN=example.com`
 - `BETTER_AUTH_SECRET` to a high-entropy value of at least 32 characters
 
+For Railway-generated `*.up.railway.app` domains, set `AUTH_CROSS_SITE_COOKIES=true`. This uses
+secure partitioned cross-site cookies. Sibling custom domains remain the preferred production
+configuration, particularly for Safari compatibility.
+
 Organization invitation records are supported in the foundation. Delivery email is intentionally
 not configured until an email provider is selected.
 
