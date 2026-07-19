@@ -1,0 +1,14 @@
+{
+  "name": "@home/sidecar",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:mac": "bun build src/index.ts --compile --target=bun-darwin-arm64 --outfile ../desktop/src-tauri/binaries/home-sidecar-aarch64-apple-darwin",
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

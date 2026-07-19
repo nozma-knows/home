@@ -21,6 +21,7 @@ import { ApprovalsView } from "./approvals-view";
 import { AuthPanel } from "./auth-panel";
 import { AutomationsView } from "./automations-view";
 import { BriefingView } from "./briefing-view";
+import { DesktopBridge } from "./desktop-bridge";
 import { MemoryView } from "./memory-view";
 import { SessionsView } from "./sessions-view";
 import { SettingsView } from "./settings-view";
@@ -100,6 +101,7 @@ export function HomeShell() {
 
   return (
     <main className="min-h-screen lg:grid lg:grid-cols-[240px_1fr]">
+      <DesktopBridge />
       <aside className="hidden min-h-screen border-r border-white/[0.06] bg-black/20 p-4 lg:flex lg:flex-col">
         <div className="flex h-11 items-center gap-2 px-2 text-sm font-semibold tracking-tight">
           <span className="grid size-7 place-items-center rounded-lg bg-emerald-400 font-mono text-xs font-bold text-zinc-950">

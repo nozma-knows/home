@@ -79,7 +79,9 @@ const sessionBody = validator(
       mode?: string;
       modelOverride?: string;
       providerAccountId?: string;
+      repositoryPath?: string;
       title?: string;
+      workingDirectory?: string;
     },
 );
 const messageBody = validator(
@@ -204,6 +206,20 @@ const forkPlanBody = validator(
       title?: string;
     },
 );
+const sidecarBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      deviceName?: string;
+    },
+);
+const permissionBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      decision?: string;
+    },
+);
 
 const MODEL_CATALOG = {
   anthropic: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
@@ -228,7 +244,9 @@ export type ApiDependencies = {
   auth: Pick<Auth, "api" | "handler">;
   credentialEncryptionKey?: string;
   database?: Database;
+  dispatchSidecar?: (userId: string, payload: Record<string, unknown>) => boolean;
   enqueue?: (name: JobName, data: object) => Promise<string | null>;
+  isSidecarConnected?: (userId: string) => boolean;
   publicURL?: string;
   trustedOrigins: string[];
   webURL?: string;
@@ -244,7 +262,9 @@ export function createApi({
   auth,
   credentialEncryptionKey = process.env.CREDENTIAL_ENCRYPTION_KEY,
   database,
+  dispatchSidecar,
   enqueue,
+  isSidecarConnected,
   publicURL = process.env.BETTER_AUTH_URL ?? "http://localhost:3001",
   trustedOrigins,
   webURL = process.env.WEB_URL ?? "http://localhost:3000",
@@ -711,8 +731,8 @@ export function createApi({
       if (!database) return context.json({ error: "Database unavailable" as const }, 503);
       const body = context.req.valid("json");
       const kind = body.kind === "coding" ? "coding" : "chat";
-      if (kind === "coding") {
-        return context.json({ error: "Coding sessions require the desktop sidecar" as const }, 409);
+      if (kind === "coding" && !body.repositoryPath?.trim()) {
+        return context.json({ error: "Coding sessions require a repository path" as const }, 400);
       }
       const mode =
         body.mode === "plan" || body.mode === "ask" || body.mode === "auto" ? body.mode : "ask";
@@ -723,12 +743,14 @@ export function createApi({
           userId: user.id,
           title: body.title?.trim() || "New session",
           kind,
-          backend: "hosted",
+          backend: kind === "coding" ? "local" : "hosted",
           mode,
           effort: body.effort ?? "medium",
           enabledToolsets: body.enabledToolsets ?? ["items", "memory"],
           providerAccountId: body.providerAccountId,
           modelOverride: body.modelOverride,
+          repositoryPath: body.repositoryPath?.trim(),
+          workingDirectory: body.workingDirectory?.trim() || body.repositoryPath?.trim(),
         })
         .returning();
       return context.json(session, 201);
@@ -806,7 +828,7 @@ export function createApi({
     .post("/v1/sessions/:id/messages", messageBody, async (context) => {
       const user = context.get("user");
       if (!user) return context.json({ error: "Unauthorized" as const }, 401);
-      if (!database || !enqueue) return context.json({ error: "Queue unavailable" as const }, 503);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
       const body = context.req.valid("json");
       if (!body.content?.trim()) return context.json({ error: "Message content is required" }, 400);
       const [session] = await database
@@ -820,10 +842,6 @@ export function createApi({
         )
         .limit(1);
       if (!session) return context.json({ error: "Session not found" as const }, 404);
-      if (session.backend !== "hosted") {
-        return context.json({ error: "The desktop sidecar owns this session" as const }, 409);
-      }
-
       const sequenceRows = await database
         .select({ sequence: max(schema.sessionEvents.sequence) })
         .from(schema.sessionEvents)
@@ -857,11 +875,37 @@ export function createApi({
           lastError: null,
         })
         .where(eq(schema.agentSessions.id, session.id));
-      const jobId = await enqueue(JOBS.runSession, {
-        runId,
-        sessionId: session.id,
-        userId: user.id,
-      });
+      let jobId: string | null = null;
+      if (session.backend === "local") {
+        const connected = dispatchSidecar?.(user.id, {
+          type: "run",
+          runId,
+          sessionId: session.id,
+          prompt: body.content.trim(),
+          mode: session.mode,
+          repositoryPath: session.repositoryPath,
+          workingDirectory: session.workingDirectory,
+        });
+        if (!connected) {
+          const error = "Desktop sidecar is not connected";
+          await database
+            .update(schema.sessionRuns)
+            .set({ status: "failed", error, completedAt: new Date() })
+            .where(eq(schema.sessionRuns.id, runId));
+          await database
+            .update(schema.agentSessions)
+            .set({ status: "failed", lastError: error })
+            .where(eq(schema.agentSessions.id, session.id));
+          return context.json({ error }, 409);
+        }
+      } else {
+        if (!enqueue) return context.json({ error: "Queue unavailable" as const }, 503);
+        jobId = await enqueue(JOBS.runSession, {
+          runId,
+          sessionId: session.id,
+          userId: user.id,
+        });
+      }
       return context.json({ eventId, jobId, queued: true as const, runId }, 202);
     })
     .get("/v1/memories", async (context) => {
@@ -1676,6 +1720,84 @@ export function createApi({
         payload: { sourcePlanId: plan.id },
       });
       return context.json({ sessionId }, 201);
+    })
+    .post("/v1/sidecars/token", sidecarBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const token = randomBytes(48).toString("base64url");
+      const tokenHash = createHash("sha256").update(token).digest("hex");
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      await database.insert(schema.sidecarTokens).values({
+        id: randomUUID(),
+        userId: user.id,
+        tokenHash,
+        deviceName: context.req.valid("json").deviceName?.trim() || "home desktop",
+        expiresAt,
+      });
+      return context.json({
+        token,
+        expiresAt,
+        socketUrl: `${publicURL.replace(/^http/, "ws")}/v1/sidecars/socket`,
+      });
+    })
+    .get("/v1/sidecars/status", (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      return context.json({ connected: isSidecarConnected?.(user.id) ?? false });
+    })
+    .get("/v1/sessions/:id/permissions", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.sessionPermissions)
+          .where(
+            and(
+              eq(schema.sessionPermissions.sessionId, context.req.param("id")),
+              eq(schema.sessionPermissions.userId, user.id),
+            ),
+          )
+          .orderBy(desc(schema.sessionPermissions.createdAt)),
+      );
+    })
+    .post("/v1/sessions/:sessionId/permissions/:id", permissionBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const decision = context.req.valid("json").decision;
+      if (decision !== "approved" && decision !== "rejected") {
+        return context.json({ error: "Decision must be approved or rejected" as const }, 400);
+      }
+      const [permission] = await database
+        .update(schema.sessionPermissions)
+        .set({ status: decision, decidedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessionPermissions.id, context.req.param("id")),
+            eq(schema.sessionPermissions.sessionId, context.req.param("sessionId")),
+            eq(schema.sessionPermissions.userId, user.id),
+            eq(schema.sessionPermissions.status, "pending"),
+            gt(schema.sessionPermissions.expiresAt, new Date()),
+          ),
+        )
+        .returning();
+      if (!permission) return context.json({ error: "Permission is unavailable or expired" }, 409);
+      const delivered = dispatchSidecar?.(user.id, {
+        type: "permission_response",
+        requestId: permission.id,
+        decision,
+      });
+      if (!delivered) {
+        await database
+          .update(schema.sessionPermissions)
+          .set({ status: "pending", decidedAt: null })
+          .where(eq(schema.sessionPermissions.id, permission.id));
+        return context.json({ error: "Desktop sidecar disconnected" }, 409);
+      }
+      return context.json(permission);
     });
 
   app.notFound((context) => context.json({ error: "Not found" as const }, 404));

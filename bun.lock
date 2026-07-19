@@ -20,6 +20,7 @@
         "@home/auth": "workspace:*",
         "@home/core": "workspace:*",
         "@home/db": "workspace:*",
+        "drizzle-orm": "0.45.2",
         "pg-boss": "12.26.1",
       },
       "devDependencies": {
@@ -31,6 +32,13 @@
       "version": "0.0.0",
       "devDependencies": {
         "@tauri-apps/cli": "2.11.1",
+        "typescript": "6.0.3",
+      },
+    },
+    "apps/sidecar": {
+      "name": "@home/sidecar",
+      "version": "0.0.0",
+      "devDependencies": {
         "typescript": "6.0.3",
       },
     },
@@ -344,6 +352,8 @@
     "@home/db": ["@home/db@workspace:packages/db"],
 
     "@home/desktop": ["@home/desktop@workspace:apps/desktop"],
+
+    "@home/sidecar": ["@home/sidecar@workspace:apps/sidecar"],
 
     "@home/ui": ["@home/ui@workspace:packages/ui"],
 

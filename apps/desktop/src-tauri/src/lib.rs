@@ -4,11 +4,52 @@ use tauri::{
     tray::TrayIconBuilder,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_shell::{ShellExt, process::CommandChild};
+
+struct SidecarState(std::sync::Mutex<Option<CommandChild>>);
+
+#[tauri::command]
+fn start_sidecar(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SidecarState>,
+    token: String,
+    socket_url: String,
+) -> Result<(), String> {
+    let mut child_state = state.0.lock().map_err(|error| error.to_string())?;
+    if child_state.is_some() {
+        return Ok(());
+    }
+    let (mut events, child) = app
+        .shell()
+        .sidecar("home-sidecar")
+        .map_err(|error| error.to_string())?
+        .args(["--socket-url", &socket_url, "--token", &token])
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match event {
+                tauri_plugin_shell::process::CommandEvent::Stdout(line) => {
+                    println!("sidecar: {}", String::from_utf8_lossy(&line));
+                }
+                tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
+                    eprintln!("sidecar: {}", String::from_utf8_lossy(&line));
+                }
+                _ => {}
+            }
+        }
+    });
+    *child_state = Some(child);
+    Ok(())
+}
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(SidecarState(std::sync::Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![start_sidecar])
         .setup(|app| {
             let show = MenuItem::with_id(app, "show", "Show home", true, None::<&str>)?;
             let push_to_talk =

@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
+    "dev": "bun run --cwd ../sidecar build:mac && tauri dev",
+    "build": "bun run --cwd ../sidecar build:mac && tauri build",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -5,6 +5,7 @@ import {
   Bot,
   ChevronDown,
   GitFork,
+  Laptop,
   LoaderCircle,
   Mic,
   Paperclip,
@@ -27,6 +28,8 @@ type ProviderAccount = {
 
 type AgentSession = {
   id: string;
+  kind: "chat" | "coding";
+  backend: "hosted" | "local";
   title: string;
   status: "idle" | "queued" | "running" | "waiting" | "failed";
   providerAccountId: string | null;
@@ -36,6 +39,8 @@ type AgentSession = {
   enabledToolsets: string[];
   lastError: string | null;
   lastActivityAt: string;
+  repositoryPath: string | null;
+  workingDirectory: string | null;
 };
 
 type SessionEvent = {
@@ -59,6 +64,14 @@ type PlanArtifact = {
   title: string;
   content: string;
   updatedAt: string;
+};
+type SessionPermission = {
+  id: string;
+  sessionId: string;
+  command: string;
+  workingDirectory: string;
+  status: string;
+  expiresAt: string;
 };
 
 type SpeechRecognitionLike = {
@@ -99,6 +112,7 @@ export function SessionsView() {
   const [error, setError] = useState<string>();
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [plans, setPlans] = useState<PlanArtifact[]>([]);
+  const [permissions, setPermissions] = useState<SessionPermission[]>([]);
   const [listening, setListening] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
@@ -178,14 +192,18 @@ export function SessionsView() {
   }, []);
 
   const loadEvents = useCallback(async (sessionId: string) => {
-    const response = await apiClient.v1.sessions[":id"].events.$get({
-      param: { id: sessionId },
-    });
+    const [response, permissionsResponse] = await Promise.all([
+      apiClient.v1.sessions[":id"].events.$get({ param: { id: sessionId } }),
+      apiClient.v1.sessions[":id"].permissions.$get({ param: { id: sessionId } }),
+    ]);
     if (response.ok) {
       setEvents((await response.json()) as SessionEvent[]);
       window.requestAnimationFrame(() =>
         transcriptEnd.current?.scrollIntoView({ behavior: "smooth" }),
       );
+    }
+    if (permissionsResponse.ok) {
+      setPermissions((await permissionsResponse.json()) as SessionPermission[]);
     }
   }, []);
 
@@ -217,19 +235,27 @@ export function SessionsView() {
     return () => unlisten?.();
   }, [startDictation]);
 
-  async function createSession() {
-    if (!accounts.length) {
+  async function createSession(kind: "chat" | "coding" = "chat") {
+    if (kind === "chat" && !accounts.length) {
       setError("Add an AI provider API key in Settings first.");
       return undefined;
     }
+    const repositoryPath =
+      kind === "coding"
+        ? window.prompt("Absolute path to the local repository")?.trim()
+        : undefined;
+    if (kind === "coding" && !repositoryPath) return undefined;
     const account = accounts[0];
-    if (!account) return undefined;
     const response = await apiClient.v1.sessions.$post({
       json: {
-        title: "New session",
-        providerAccountId: account.id,
-        modelOverride: models[account.provider]?.[0],
-        enabledToolsets: ["items", "memory"],
+        title:
+          kind === "coding" ? repositoryPath?.split("/").pop() || "Coding session" : "New session",
+        kind,
+        providerAccountId: account?.id,
+        modelOverride: account ? models[account.provider]?.[0] : undefined,
+        enabledToolsets: kind === "coding" ? ["filesystem", "shell", "git"] : ["items", "memory"],
+        repositoryPath,
+        workingDirectory: repositoryPath,
       },
     });
     if (!response.ok) {
@@ -267,7 +293,7 @@ export function SessionsView() {
   async function sendMessage() {
     if (!message.trim() || pending) return;
     let session = active;
-    if (!session) session = await createSession();
+    if (!session) session = await createSession("chat");
     if (!session) return;
     setPending(true);
     setError(undefined);
@@ -295,7 +321,7 @@ export function SessionsView() {
   async function uploadFiles(files: FileList | null) {
     if (!files?.length) return;
     let session = active;
-    if (!session) session = await createSession();
+    if (!session) session = await createSession("chat");
     if (!session) return;
     setPending(true);
     for (const file of Array.from(files)) {
@@ -348,11 +374,26 @@ export function SessionsView() {
     }
   }
 
+  async function decidePermission(
+    permission: SessionPermission,
+    decision: "approved" | "rejected",
+  ) {
+    const response = await apiClient.v1.sessions[":sessionId"].permissions[":id"].$post({
+      param: { sessionId: permission.sessionId, id: permission.id },
+      json: { decision },
+    });
+    if (response.ok && activeId) await loadEvents(activeId);
+    else setError("The desktop sidecar is no longer connected.");
+  }
+
   const transcript = useMemo(
     () =>
       events.filter(
         (event) =>
-          event.type === "message" || event.type === "plan" || event.type.startsWith("tool_"),
+          event.type === "message" ||
+          event.type === "plan" ||
+          event.type === "diff" ||
+          event.type.startsWith("tool_"),
       ),
     [events],
   );
@@ -362,8 +403,15 @@ export function SessionsView() {
       <Card className="hidden min-h-0 overflow-hidden xl:flex xl:flex-col">
         <div className="flex items-center justify-between border-b border-white/[0.06] p-3">
           <p className="text-xs font-medium text-zinc-400">Sessions</p>
-          <Button className="size-8 p-0" onClick={() => void createSession()} variant="ghost">
+          <Button className="size-8 p-0" onClick={() => void createSession("chat")} variant="ghost">
             <Plus className="size-4" />
+          </Button>
+          <Button
+            className="size-8 p-0"
+            onClick={() => void createSession("coding")}
+            variant="ghost"
+          >
+            <Laptop className="size-4" />
           </Button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -389,6 +437,7 @@ export function SessionsView() {
                         : "bg-emerald-400",
                   )}
                 />
+                {session.kind === "coding" ? "local · " : ""}
                 {session.status}
               </p>
             </button>
@@ -471,7 +520,9 @@ export function SessionsView() {
                 </span>
                 <h2 className="mt-4 text-lg font-medium text-zinc-200">What should we work on?</h2>
                 <p className="mt-2 text-sm leading-6 text-zinc-600">
-                  Search connected work, reason over your inbox, or ask home to remember something.
+                  {active?.kind === "coding"
+                    ? "Run a read-only check, or prefix an exact local command with “$ ”. Mutating commands ask permission."
+                    : "Search connected work, reason over your inbox, or ask home to remember something."}
                 </p>
               </div>
             </div>
@@ -492,6 +543,16 @@ export function SessionsView() {
                         {JSON.stringify(event.payload, null, 2)}
                       </pre>
                     </div>
+                  </div>
+                ) : event.type === "diff" ? (
+                  <div
+                    className="rounded-xl border border-sky-400/15 bg-sky-400/[0.03] p-4"
+                    key={event.id}
+                  >
+                    <p className="text-xs font-medium text-sky-300">Working tree diff</p>
+                    <pre className="mt-3 max-h-96 overflow-auto whitespace-pre font-mono text-[10px] leading-5 text-zinc-500">
+                      {event.content}
+                    </pre>
                   </div>
                 ) : event.type === "plan" ? (
                   <div
@@ -528,6 +589,31 @@ export function SessionsView() {
                   </div>
                 ),
               )}
+              {permissions
+                .filter((permission) => permission.status === "pending")
+                .map((permission) => (
+                  <div
+                    className="rounded-xl border border-amber-400/20 bg-amber-400/[0.04] p-4"
+                    key={permission.id}
+                  >
+                    <p className="text-xs font-medium text-amber-300">Permission required</p>
+                    <code className="mt-3 block rounded-lg bg-black/30 p-3 text-xs text-zinc-300">
+                      {permission.command}
+                    </code>
+                    <p className="mt-2 text-[10px] text-zinc-700">{permission.workingDirectory}</p>
+                    <div className="mt-4 flex gap-2">
+                      <Button onClick={() => void decidePermission(permission, "approved")}>
+                        Approve
+                      </Button>
+                      <Button
+                        onClick={() => void decidePermission(permission, "rejected")}
+                        variant="secondary"
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                ))}
               {active?.status === "queued" || active?.status === "running" ? (
                 <div className="flex items-center gap-2 text-xs text-zinc-600">
                   <LoaderCircle className="size-3.5 animate-spin text-emerald-400" /> home is
@@ -602,15 +688,19 @@ export function SessionsView() {
             <label className="relative hidden sm:block">
               <select
                 className="max-w-40 appearance-none bg-transparent py-2 pl-2 pr-6 text-[10px] text-zinc-600 outline-none"
-                disabled={!active}
+                disabled={!active || active.kind === "coding"}
                 onChange={(event) => void updateSession({ modelOverride: event.target.value })}
                 value={active?.modelOverride ?? ""}
               >
-                {modelOptions.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {active?.kind === "coding" ? (
+                  <option value="">Local sidecar</option>
+                ) : (
+                  modelOptions.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))
+                )}
               </select>
               <ChevronDown className="pointer-events-none absolute right-1 top-3 size-3 text-zinc-700" />
             </label>
