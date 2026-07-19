@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api-client";
 
 import { AiSettings } from "./ai-settings";
+import { NewsSettings } from "./news-settings";
 
 type Connector = {
   id: "gmail" | "slack" | "linear";
@@ -207,6 +208,7 @@ export function SettingsView() {
         </div>
       </section>
       <AiSettings />
+      <NewsSettings />
     </div>
   );
 }

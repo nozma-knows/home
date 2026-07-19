@@ -104,6 +104,31 @@ const attachmentBody = validator(
       sizeBytes?: number;
     },
 );
+const briefingPreferencesBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      deliveryHour?: number;
+      enabled?: boolean;
+      newsLimit?: number;
+      timezone?: string;
+    },
+);
+const feedBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      title?: string;
+      url?: string;
+    },
+);
+const topicBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      topic?: string;
+    },
+);
 
 const MODEL_CATALOG = {
   anthropic: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
@@ -935,6 +960,215 @@ export function createApi({
         .returning();
       if (!attachment) return context.json({ error: "Attachment not found" as const }, 404);
       return context.json(attachment);
+    })
+    .get("/v1/briefings/latest", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const [briefing] = await database
+        .select()
+        .from(schema.briefings)
+        .where(eq(schema.briefings.userId, user.id))
+        .orderBy(desc(schema.briefings.generatedAt))
+        .limit(1);
+      return context.json(briefing ?? null);
+    })
+    .get("/v1/briefings", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.briefings)
+          .where(eq(schema.briefings.userId, user.id))
+          .orderBy(desc(schema.briefings.generatedAt))
+          .limit(30),
+      );
+    })
+    .post("/v1/briefings/generate", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!enqueue) return context.json({ error: "Queue unavailable" as const }, 503);
+      const jobId = await enqueue(JOBS.generateBriefing, { userId: user.id, force: true });
+      return context.json({ jobId, queued: true as const }, 202);
+    })
+    .get("/v1/briefing-preferences", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const [preference] = await database
+        .select()
+        .from(schema.briefingPreferences)
+        .where(eq(schema.briefingPreferences.userId, user.id))
+        .limit(1);
+      return context.json(
+        preference ?? {
+          timezone: "America/New_York",
+          deliveryHour: 7,
+          newsLimit: 8,
+          enabled: true,
+        },
+      );
+    })
+    .put("/v1/briefing-preferences", briefingPreferencesBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const body = context.req.valid("json");
+      if (
+        !body.timezone ||
+        body.deliveryHour === undefined ||
+        body.deliveryHour < 0 ||
+        body.deliveryHour > 23 ||
+        body.newsLimit === undefined ||
+        body.newsLimit < 0 ||
+        body.newsLimit > 20
+      ) {
+        return context.json({ error: "Valid timezone, hour, and news limit are required" }, 400);
+      }
+      try {
+        Intl.DateTimeFormat("en-US", { timeZone: body.timezone });
+      } catch {
+        return context.json({ error: "Invalid IANA timezone" as const }, 400);
+      }
+      const [preference] = await database
+        .insert(schema.briefingPreferences)
+        .values({
+          id: randomUUID(),
+          userId: user.id,
+          timezone: body.timezone,
+          deliveryHour: body.deliveryHour,
+          newsLimit: body.newsLimit,
+          enabled: body.enabled ?? true,
+        })
+        .onConflictDoUpdate({
+          target: schema.briefingPreferences.userId,
+          set: {
+            timezone: body.timezone,
+            deliveryHour: body.deliveryHour,
+            newsLimit: body.newsLimit,
+            enabled: body.enabled ?? true,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+      return context.json(preference);
+    })
+    .get("/v1/rss-feeds", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.rssFeeds)
+          .where(eq(schema.rssFeeds.userId, user.id))
+          .orderBy(asc(schema.rssFeeds.title)),
+      );
+    })
+    .post("/v1/rss-feeds", feedBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database || !enqueue) return context.json({ error: "Queue unavailable" as const }, 503);
+      const body = context.req.valid("json");
+      if (!body.url) return context.json({ error: "Feed URL is required" as const }, 400);
+      let url: URL;
+      try {
+        url = new URL(body.url);
+        if (!["http:", "https:"].includes(url.protocol)) throw new Error("Invalid protocol");
+      } catch {
+        return context.json({ error: "A valid HTTP(S) feed URL is required" as const }, 400);
+      }
+      const id = randomUUID();
+      const [feed] = await database
+        .insert(schema.rssFeeds)
+        .values({
+          id,
+          userId: user.id,
+          url: url.toString(),
+          title: body.title?.trim() || url.hostname,
+        })
+        .onConflictDoUpdate({
+          target: [schema.rssFeeds.userId, schema.rssFeeds.url],
+          set: { active: true, title: body.title?.trim() || url.hostname, updatedAt: new Date() },
+        })
+        .returning();
+      if (feed) await enqueue(JOBS.syncFeed, { feedId: feed.id, userId: user.id });
+      return context.json(feed, 201);
+    })
+    .post("/v1/rss-feeds/:id/sync", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database || !enqueue) return context.json({ error: "Queue unavailable" as const }, 503);
+      const [feed] = await database
+        .select({ id: schema.rssFeeds.id })
+        .from(schema.rssFeeds)
+        .where(
+          and(eq(schema.rssFeeds.id, context.req.param("id")), eq(schema.rssFeeds.userId, user.id)),
+        )
+        .limit(1);
+      if (!feed) return context.json({ error: "Feed not found" as const }, 404);
+      const jobId = await enqueue(JOBS.syncFeed, { feedId: feed.id, userId: user.id });
+      return context.json({ jobId, queued: true as const }, 202);
+    })
+    .delete("/v1/rss-feeds/:id", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const deleted = await database
+        .delete(schema.rssFeeds)
+        .where(
+          and(eq(schema.rssFeeds.id, context.req.param("id")), eq(schema.rssFeeds.userId, user.id)),
+        )
+        .returning({ id: schema.rssFeeds.id });
+      if (!deleted.length) return context.json({ error: "Feed not found" as const }, 404);
+      return context.json({ deleted: true as const });
+    })
+    .get("/v1/news-topics", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.newsTopics)
+          .where(eq(schema.newsTopics.userId, user.id))
+          .orderBy(asc(schema.newsTopics.topic)),
+      );
+    })
+    .post("/v1/news-topics", topicBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const topic = context.req.valid("json").topic?.trim();
+      if (!topic || topic.length > 120)
+        return context.json({ error: "A short topic is required" }, 400);
+      const [row] = await database
+        .insert(schema.newsTopics)
+        .values({ id: randomUUID(), userId: user.id, topic })
+        .onConflictDoUpdate({
+          target: [schema.newsTopics.userId, schema.newsTopics.topic],
+          set: { active: true },
+        })
+        .returning();
+      return context.json(row, 201);
+    })
+    .delete("/v1/news-topics/:id", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const deleted = await database
+        .delete(schema.newsTopics)
+        .where(
+          and(
+            eq(schema.newsTopics.id, context.req.param("id")),
+            eq(schema.newsTopics.userId, user.id),
+          ),
+        )
+        .returning({ id: schema.newsTopics.id });
+      if (!deleted.length) return context.json({ error: "Topic not found" as const }, 404);
+      return context.json({ deleted: true as const });
     });
 
   app.notFound((context) => context.json({ error: "Not found" as const }, 404));

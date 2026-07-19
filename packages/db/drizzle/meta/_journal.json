@@ -22,6 +22,20 @@
       "when": 1784476794797,
       "tag": "0002_small_catseye",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784477526238,
+      "tag": "0003_last_gideon",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784477620170,
+      "tag": "0004_spicy_drax",
+      "breakpoints": true
     }
   ]
 }

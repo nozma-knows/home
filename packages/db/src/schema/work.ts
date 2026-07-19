@@ -12,8 +12,10 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { organizations, users } from "./auth";
+import { rssFeeds } from "./briefing";
 
 export type ConnectionProvider = "gmail" | "slack" | "linear";
+export type ItemProvider = ConnectionProvider | "rss" | "web";
 export type ConnectionStatus = "active" | "needs_reattention" | "disconnected";
 export type ItemStatus = "open" | "done" | "archived" | "snoozed";
 
@@ -86,10 +88,11 @@ export const items = pgTable(
     organizationId: text("organization_id").references(() => organizations.id, {
       onDelete: "cascade",
     }),
-    connectionId: text("connection_id")
-      .notNull()
-      .references(() => connections.id, { onDelete: "cascade" }),
-    provider: text("provider").$type<ConnectionProvider>().notNull(),
+    connectionId: text("connection_id").references(() => connections.id, {
+      onDelete: "cascade",
+    }),
+    rssFeedId: text("rss_feed_id").references(() => rssFeeds.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<ItemProvider>().notNull(),
     externalId: text("external_id").notNull(),
     threadId: text("thread_id"),
     type: text("type").notNull(),
@@ -114,6 +117,7 @@ export const items = pgTable(
   },
   (table) => [
     uniqueIndex("items_connection_external_unique").on(table.connectionId, table.externalId),
+    uniqueIndex("items_feed_external_unique").on(table.rssFeedId, table.externalId),
     index("items_user_status_occurred_idx").on(table.userId, table.status, table.occurredAt),
     index("items_organization_id_idx").on(table.organizationId),
     index("items_provider_idx").on(table.provider),
@@ -164,6 +168,10 @@ export const itemsRelations = relations(items, ({ many, one }) => ({
   connection: one(connections, {
     fields: [items.connectionId],
     references: [connections.id],
+  }),
+  rssFeed: one(rssFeeds, {
+    fields: [items.rssFeedId],
+    references: [rssFeeds.id],
   }),
   actionRequests: many(itemActionRequests),
 }));

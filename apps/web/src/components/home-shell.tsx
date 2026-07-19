@@ -1,11 +1,10 @@
 "use client";
 
-import { Button, Card, cn } from "@home/ui";
+import { Card, cn } from "@home/ui";
 import {
   Bot,
   Brain,
   BriefcaseBusiness,
-  CheckCircle2,
   ChevronDown,
   CircleDot,
   Inbox,
@@ -16,10 +15,10 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { apiClient } from "@/lib/api-client";
 import { authClient } from "@/lib/auth-client";
 
 import { AuthPanel } from "./auth-panel";
+import { BriefingView } from "./briefing-view";
 import { MemoryView } from "./memory-view";
 import { SessionsView } from "./sessions-view";
 import { SettingsView } from "./settings-view";
@@ -41,7 +40,6 @@ type View = "briefing" | "triage" | "sessions" | "automations" | "memory" | "set
 
 export function HomeShell() {
   const session = authClient.useSession();
-  const [apiStatus, setApiStatus] = useState<"checking" | "online" | "offline">("checking");
   const [view, setView] = useState<View>("briefing");
 
   useEffect(() => {
@@ -53,21 +51,6 @@ export function HomeShell() {
     ) {
       setView(requestedView as View);
     }
-
-    let active = true;
-
-    apiClient.health
-      .$get()
-      .then((response) => {
-        if (active) setApiStatus(response.ok ? "online" : "offline");
-      })
-      .catch(() => {
-        if (active) setApiStatus("offline");
-      });
-
-    return () => {
-      active = false;
-    };
   }, []);
 
   function selectView(nextView: View) {
@@ -176,99 +159,7 @@ export function HomeShell() {
         {view === "memory" ? <MemoryView /> : null}
         {view === "settings" ? <SettingsView /> : null}
         {view === "automations" ? <EmptySurface view={view} /> : null}
-        {view === "briefing" ? (
-          <>
-            <header className="mx-auto flex max-w-5xl items-start justify-between gap-4">
-              <div>
-                <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-zinc-600">
-                  Sunday · Foundation
-                </p>
-                <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-                  Good morning, {firstName}.
-                </h1>
-                <p className="mt-2 text-sm text-zinc-500">
-                  Your command center is ready to connect.
-                </p>
-              </div>
-              <div className="flex items-center gap-2 rounded-full border border-white/[0.07] bg-white/[0.03] px-3 py-1.5 text-xs text-zinc-500">
-                <span
-                  className={cn(
-                    "size-1.5 rounded-full",
-                    apiStatus === "online"
-                      ? "bg-emerald-400"
-                      : apiStatus === "offline"
-                        ? "bg-red-400"
-                        : "animate-pulse bg-amber-400",
-                  )}
-                />
-                API {apiStatus}
-              </div>
-            </header>
-
-            <div className="mx-auto mt-10 grid max-w-5xl gap-4 lg:grid-cols-[1.5fr_1fr]">
-              <Card className="min-h-80 p-6 sm:p-8">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-600">
-                      Morning briefing
-                    </p>
-                    <h2 className="mt-2 text-lg font-medium text-zinc-200">
-                      Nothing connected yet
-                    </h2>
-                  </div>
-                  <Sparkles className="size-5 text-emerald-400/70" />
-                </div>
-                <div className="mt-12 max-w-md">
-                  <p className="text-sm leading-6 text-zinc-500">
-                    Connect Gmail, Slack, and Linear to build your first briefing and unified triage
-                    feed. Connector work begins in Phase 2.
-                  </p>
-                  <Button className="mt-6" variant="secondary">
-                    Generate briefing
-                  </Button>
-                </div>
-              </Card>
-
-              <div className="grid gap-4">
-                <Card className="p-5">
-                  <div className="flex items-center gap-3">
-                    <span className="grid size-9 place-items-center rounded-lg bg-emerald-400/10 text-emerald-400">
-                      <CheckCircle2 className="size-4" />
-                    </span>
-                    <div>
-                      <p className="text-sm font-medium text-zinc-200">Account secured</p>
-                      <p className="mt-0.5 text-xs text-zinc-600">Better Auth session active</p>
-                    </div>
-                  </div>
-                </Card>
-                <Card className="p-5">
-                  <div className="flex items-center gap-3">
-                    <span className="grid size-9 place-items-center rounded-lg bg-violet-400/10 text-violet-300">
-                      <BriefcaseBusiness className="size-4" />
-                    </span>
-                    <div>
-                      <p className="text-sm font-medium text-zinc-200">Organizations ready</p>
-                      <p className="mt-0.5 text-xs text-zinc-600">Personal scope is the default</p>
-                    </div>
-                  </div>
-                </Card>
-                <Card className="p-5">
-                  <div className="flex items-center gap-3">
-                    <span className="grid size-9 place-items-center rounded-lg bg-sky-400/10 text-sky-300">
-                      <Bot className="size-4" />
-                    </span>
-                    <div>
-                      <p className="text-sm font-medium text-zinc-200">Agent layer planned</p>
-                      <p className="mt-0.5 text-xs text-zinc-600">
-                        Hosted sessions arrive in Phase 3
-                      </p>
-                    </div>
-                  </div>
-                </Card>
-              </div>
-            </div>
-          </>
-        ) : null}
+        {view === "briefing" ? <BriefingView firstName={firstName ?? "there"} /> : null}
       </section>
     </main>
   );

@@ -1,19 +1,22 @@
+import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 
 import { runHostedAgent } from "@home/agent";
 import { createProviderModel, estimateCostUsd, findMemoryDuplicate, resolveModel } from "@home/ai";
-import { decryptCredential, getConnector } from "@home/connectors";
+import { decryptCredential, fetchFeed, getConnector } from "@home/connectors";
 import {
   type DistillSessionJob,
   type ExecuteItemActionJob,
+  type GenerateBriefingJob,
   JOBS,
   type RunSessionJob,
   rankTriageItem,
   type SyncConnectionJob,
+  type SyncFeedJob,
 } from "@home/core";
 import { getDatabase, schema } from "@home/db";
 import { type ModelMessage, tool } from "ai";
-import { and, asc, desc, eq, ilike, isNull, max, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, isNull, max, ne, or, sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import { z } from "zod";
 
@@ -554,6 +557,303 @@ await boss.work<DistillSessionJob>(JOBS.distillSession, async (jobs) => {
   }
 });
 
+await boss.work<SyncFeedJob>(JOBS.syncFeed, async (jobs) => {
+  for (const job of jobs) {
+    const [feed] = await database
+      .select()
+      .from(schema.rssFeeds)
+      .where(
+        and(eq(schema.rssFeeds.id, job.data.feedId), eq(schema.rssFeeds.userId, job.data.userId)),
+      )
+      .limit(1);
+    if (!feed?.active) continue;
+    try {
+      const parsed = await fetchFeed(feed.url);
+      for (const entry of parsed.entries.slice(0, 100)) {
+        const occurredAt = Number.isNaN(entry.occurredAt.getTime()) ? new Date() : entry.occurredAt;
+        await database
+          .insert(schema.items)
+          .values({
+            id: crypto.randomUUID(),
+            userId: feed.userId,
+            organizationId: feed.organizationId,
+            rssFeedId: feed.id,
+            provider: "rss",
+            externalId: entry.externalId,
+            type: "news",
+            title: entry.title,
+            body: entry.body,
+            preview: entry.preview,
+            participants: [parsed.title ?? feed.title],
+            externalUrl: entry.externalUrl,
+            isRead: false,
+            urgencyScore: 0,
+            occurredAt,
+            raw: entry.raw,
+          })
+          .onConflictDoUpdate({
+            target: [schema.items.rssFeedId, schema.items.externalId],
+            set: {
+              title: entry.title,
+              body: entry.body,
+              preview: entry.preview,
+              externalUrl: entry.externalUrl,
+              occurredAt,
+              updatedAt: new Date(),
+            },
+          });
+      }
+      await database
+        .update(schema.rssFeeds)
+        .set({
+          title: parsed.title ?? feed.title,
+          lastSyncedAt: new Date(),
+          lastError: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.rssFeeds.id, feed.id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "RSS sync failed";
+      await database
+        .update(schema.rssFeeds)
+        .set({ lastError: message, updatedAt: new Date() })
+        .where(eq(schema.rssFeeds.id, feed.id));
+      throw error;
+    }
+  }
+});
+
+await boss.work(JOBS.syncFeeds, async () => {
+  const feeds = await database
+    .select({ id: schema.rssFeeds.id, userId: schema.rssFeeds.userId })
+    .from(schema.rssFeeds)
+    .where(eq(schema.rssFeeds.active, true));
+  for (const feed of feeds) {
+    await boss.send(
+      JOBS.syncFeed,
+      { feedId: feed.id, userId: feed.userId },
+      { singletonKey: feed.id, singletonSeconds: 300 },
+    );
+  }
+});
+
+function localDate(now: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone,
+  }).formatToParts(now);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
+function localHour(now: Date, timeZone: string) {
+  return Number(
+    new Intl.DateTimeFormat("en-US", {
+      hour: "2-digit",
+      hourCycle: "h23",
+      timeZone,
+    }).format(now),
+  );
+}
+
+type TavilyResult = { title?: string; url?: string; content?: string; published_date?: string };
+
+async function searchTopic(topic: string): Promise<TavilyResult[]> {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) return [];
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      api_key: apiKey,
+      query: topic,
+      topic: "news",
+      days: 7,
+      max_results: 3,
+      include_answer: false,
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!response.ok) throw new Error(`News search returned HTTP ${response.status}`);
+  const result = (await response.json()) as { results?: TavilyResult[] };
+  return result.results ?? [];
+}
+
+await boss.work<GenerateBriefingJob>(JOBS.generateBriefing, async (jobs) => {
+  for (const job of jobs) {
+    let [preference] = await database
+      .select()
+      .from(schema.briefingPreferences)
+      .where(eq(schema.briefingPreferences.userId, job.data.userId))
+      .limit(1);
+    if (!preference) {
+      [preference] = await database
+        .insert(schema.briefingPreferences)
+        .values({ id: crypto.randomUUID(), userId: job.data.userId })
+        .returning();
+    }
+    if (!preference?.enabled) continue;
+    const today = localDate(new Date(), preference.timezone);
+    if (!job.data.force && preference.lastGeneratedDate === today) continue;
+
+    const topics = await database
+      .select()
+      .from(schema.newsTopics)
+      .where(
+        and(eq(schema.newsTopics.userId, job.data.userId), eq(schema.newsTopics.active, true)),
+      );
+    for (const topic of topics) {
+      try {
+        for (const result of await searchTopic(topic.topic)) {
+          if (!result.url || !result.title) continue;
+          const externalId = createHash("sha256").update(result.url).digest("hex");
+          const [existing] = await database
+            .select({ id: schema.items.id })
+            .from(schema.items)
+            .where(
+              and(
+                eq(schema.items.userId, job.data.userId),
+                eq(schema.items.provider, "web"),
+                eq(schema.items.externalId, externalId),
+              ),
+            )
+            .limit(1);
+          if (existing) continue;
+          await database.insert(schema.items).values({
+            id: crypto.randomUUID(),
+            userId: job.data.userId,
+            provider: "web",
+            externalId,
+            type: "news",
+            title: result.title,
+            body: result.content,
+            preview: result.content?.slice(0, 280),
+            participants: [topic.topic],
+            externalUrl: result.url,
+            occurredAt: result.published_date ? new Date(result.published_date) : new Date(),
+            raw: { ...result, topic: topic.topic },
+          });
+        }
+      } catch (error) {
+        console.error(`News search failed for ${topic.topic}`, error);
+      }
+    }
+
+    const openItems = await database
+      .select()
+      .from(schema.items)
+      .where(
+        and(
+          eq(schema.items.userId, job.data.userId),
+          eq(schema.items.status, "open"),
+          ne(schema.items.type, "news"),
+        ),
+      )
+      .orderBy(desc(schema.items.urgencyScore), desc(schema.items.occurredAt))
+      .limit(30);
+    const newsItems = await database
+      .select()
+      .from(schema.items)
+      .where(
+        and(
+          eq(schema.items.userId, job.data.userId),
+          eq(schema.items.status, "open"),
+          eq(schema.items.type, "news"),
+        ),
+      )
+      .orderBy(desc(schema.items.occurredAt))
+      .limit(preference.newsLimit);
+
+    const priorities = openItems.slice(0, 5).map((item) => ({
+      id: item.id,
+      title: item.title,
+      provider: item.provider,
+      reason: item.isDirectMention
+        ? "Directly mentions you"
+        : item.isAssigned
+          ? "Assigned to you"
+          : "Recent high-priority work",
+      ...(item.externalUrl ? { url: item.externalUrl } : {}),
+    }));
+    const waiting = openItems
+      .filter((item) => !item.isRead && !priorities.some((priority) => priority.id === item.id))
+      .slice(0, 5)
+      .map((item) => ({
+        id: item.id,
+        title: item.title,
+        provider: item.provider,
+        ...(item.externalUrl ? { url: item.externalUrl } : {}),
+      }));
+    const blocking = openItems
+      .filter((item) => item.provider === "linear" && item.isAssigned)
+      .slice(0, 5)
+      .map((item) => ({
+        id: item.id,
+        title: item.title,
+        provider: item.provider,
+        ...(item.externalUrl ? { url: item.externalUrl } : {}),
+      }));
+    const news = newsItems.map((item) => ({
+      id: item.id,
+      title: item.title,
+      source: item.participants[0] ?? item.provider,
+      why:
+        item.provider === "web"
+          ? `Matches your ${String(item.raw.topic ?? "news")} topic`
+          : "From a feed you follow",
+      ...(item.externalUrl ? { url: item.externalUrl } : {}),
+    }));
+    const headline = priorities.length
+      ? `${priorities.length} priorities need your attention`
+      : "You're clear to focus";
+    const summary = `${openItems.length} open work items and ${news.length} relevant news stories.`;
+    await database
+      .insert(schema.briefings)
+      .values({
+        id: crypto.randomUUID(),
+        userId: job.data.userId,
+        localDate: today,
+        headline,
+        summary,
+        sections: { priorities, waiting, blocking, approvals: [], news },
+      })
+      .onConflictDoUpdate({
+        target: [schema.briefings.userId, schema.briefings.localDate],
+        set: {
+          headline,
+          summary,
+          sections: { priorities, waiting, blocking, approvals: [], news },
+          generatedAt: new Date(),
+          status: "ready",
+        },
+      });
+    await database
+      .update(schema.briefingPreferences)
+      .set({ lastGeneratedDate: today, updatedAt: new Date() })
+      .where(eq(schema.briefingPreferences.id, preference.id));
+  }
+});
+
+await boss.work(JOBS.generateScheduledBriefings, async () => {
+  const now = new Date();
+  const preferences = await database
+    .select()
+    .from(schema.briefingPreferences)
+    .where(eq(schema.briefingPreferences.enabled, true));
+  for (const preference of preferences) {
+    if (localHour(now, preference.timezone) !== preference.deliveryHour) continue;
+    const today = localDate(now, preference.timezone);
+    if (preference.lastGeneratedDate === today) continue;
+    await boss.send(
+      JOBS.generateBriefing,
+      { userId: preference.userId },
+      { singletonKey: `${preference.userId}:${today}`, singletonSeconds: 3600 },
+    );
+  }
+});
+
 await boss.work(JOBS.syncConnections, async () => {
   const activeConnections = await database
     .select({ id: schema.connections.id, userId: schema.connections.userId })
@@ -569,6 +869,8 @@ await boss.work(JOBS.syncConnections, async () => {
 });
 
 await boss.schedule(JOBS.syncConnections, "*/2 * * * *");
+await boss.schedule(JOBS.syncFeeds, "*/15 * * * *");
+await boss.schedule(JOBS.generateScheduledBriefings, "5 * * * *");
 console.log(`${workerName} started with connector sync workers`);
 
 let stopping = false;
