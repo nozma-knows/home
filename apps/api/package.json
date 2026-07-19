@@ -10,7 +10,10 @@
   },
   "dependencies": {
     "@home/api": "workspace:*",
-    "@home/auth": "workspace:*"
+    "@home/auth": "workspace:*",
+    "@home/core": "workspace:*",
+    "@home/db": "workspace:*",
+    "pg-boss": "12.26.1"
   },
   "devDependencies": {
     "typescript": "6.0.3"

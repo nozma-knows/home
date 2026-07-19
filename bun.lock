@@ -18,6 +18,9 @@
       "dependencies": {
         "@home/api": "workspace:*",
         "@home/auth": "workspace:*",
+        "@home/core": "workspace:*",
+        "@home/db": "workspace:*",
+        "pg-boss": "12.26.1",
       },
       "devDependencies": {
         "typescript": "6.0.3",
@@ -49,6 +52,10 @@
       "name": "@home/worker",
       "version": "0.0.0",
       "dependencies": {
+        "@home/connectors": "workspace:*",
+        "@home/core": "workspace:*",
+        "@home/db": "workspace:*",
+        "drizzle-orm": "0.45.2",
         "pg-boss": "12.26.1",
       },
       "devDependencies": {
@@ -61,6 +68,10 @@
       "version": "0.0.0",
       "dependencies": {
         "@home/auth": "workspace:*",
+        "@home/connectors": "workspace:*",
+        "@home/core": "workspace:*",
+        "@home/db": "workspace:*",
+        "drizzle-orm": "0.45.2",
         "hono": "4.12.31",
       },
       "devDependencies": {
@@ -77,6 +88,20 @@
         "better-auth": "1.6.23",
         "resend": "6.17.2",
       },
+      "devDependencies": {
+        "typescript": "6.0.3",
+      },
+    },
+    "packages/connectors": {
+      "name": "@home/connectors",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.3",
+      },
+    },
+    "packages/core": {
+      "name": "@home/core",
+      "version": "0.0.0",
       "devDependencies": {
         "typescript": "6.0.3",
       },
@@ -214,6 +239,10 @@
     "@home/api-server": ["@home/api-server@workspace:apps/api"],
 
     "@home/auth": ["@home/auth@workspace:packages/auth"],
+
+    "@home/connectors": ["@home/connectors@workspace:packages/connectors"],
+
+    "@home/core": ["@home/core@workspace:packages/core"],
 
     "@home/db": ["@home/db@workspace:packages/db"],
 

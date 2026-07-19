@@ -11,6 +11,10 @@
   },
   "dependencies": {
     "@home/auth": "workspace:*",
+    "@home/connectors": "workspace:*",
+    "@home/core": "workspace:*",
+    "@home/db": "workspace:*",
+    "drizzle-orm": "0.45.2",
     "hono": "4.12.31"
   },
   "devDependencies": {
