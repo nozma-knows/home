@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api-client";
 
 import { AiSettings } from "./ai-settings";
+import { ExtensionsSettings } from "./extensions-settings";
 import { NewsSettings } from "./news-settings";
 
 type Connector = {
@@ -209,6 +210,7 @@ export function SettingsView() {
       </section>
       <AiSettings />
       <NewsSettings />
+      <ExtensionsSettings />
     </div>
   );
 }

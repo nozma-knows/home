@@ -10,7 +10,14 @@ import {
   isConnectorId,
   listConnectors,
 } from "@home/connectors";
-import { JOBS, type JobName } from "@home/core";
+import { compileAutomationPrompt, JOBS, type JobName } from "@home/core";
+import type {
+  AutomationAction,
+  AutomationCondition,
+  AutomationStatus,
+  AutomationTrigger,
+  AutonomyLevel,
+} from "@home/db";
 import { type Database, schema } from "@home/db";
 import { and, asc, desc, eq, gt, isNull, lt, max, or, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -127,6 +134,74 @@ const topicBody = validator(
   (value) =>
     (value && typeof value === "object" ? value : {}) as {
       topic?: string;
+    },
+);
+const automationBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      actions?: Array<{
+        id?: string;
+        type?: string;
+        config?: Record<string, unknown>;
+        modelOverride?: string;
+      }>;
+      allowAutoExternal?: boolean;
+      autonomyLevel?: string;
+      conditions?: Array<{
+        field?: string;
+        operator?: string;
+        value?: string | boolean;
+      }>;
+      description?: string;
+      modelOverride?: string;
+      name?: string;
+      prompt?: string;
+      providerAccountId?: string;
+      status?: string;
+      trigger?: Record<string, unknown>;
+    },
+);
+const approvalBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      editedPayload?: Record<string, unknown>;
+    },
+);
+const mcpBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      command?: string;
+      config?: Record<string, unknown>;
+      enabled?: boolean;
+      name?: string;
+      transport?: string;
+      url?: string;
+    },
+);
+const pluginBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      description?: string;
+      enabled?: boolean;
+      instructions?: string;
+      name?: string;
+      slashCommand?: string;
+    },
+);
+const forkPlanBody = validator(
+  "json",
+  (value) =>
+    (value && typeof value === "object" ? value : {}) as {
+      backend?: string;
+      effort?: string;
+      mode?: string;
+      modelOverride?: string;
+      providerAccountId?: string;
+      title?: string;
     },
 );
 
@@ -1169,6 +1244,438 @@ export function createApi({
         .returning({ id: schema.newsTopics.id });
       if (!deleted.length) return context.json({ error: "Topic not found" as const }, 404);
       return context.json({ deleted: true as const });
+    })
+    .post("/v1/automations/compile", automationBody, (context) => {
+      if (!context.get("user")) return context.json({ error: "Unauthorized" as const }, 401);
+      const prompt = context.req.valid("json").prompt?.trim();
+      if (!prompt) return context.json({ error: "Describe the automation first" as const }, 400);
+      return context.json(compileAutomationPrompt(prompt));
+    })
+    .get("/v1/automations", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.automations)
+          .where(eq(schema.automations.userId, user.id))
+          .orderBy(desc(schema.automations.updatedAt)),
+      );
+    })
+    .post("/v1/automations", automationBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const body = context.req.valid("json");
+      if (!body.name?.trim() || !body.trigger || !body.actions?.length) {
+        return context.json({ error: "Name, trigger, and actions are required" as const }, 400);
+      }
+      const statuses = ["draft", "suggested", "active", "paused"] as const;
+      const autonomyLevels = ["suggest", "approve", "auto"] as const;
+      const [automation] = await database
+        .insert(schema.automations)
+        .values({
+          id: randomUUID(),
+          userId: user.id,
+          name: body.name.trim(),
+          description: body.description,
+          status:
+            body.status && inArrayValue(statuses, body.status) ? body.status : ("draft" as const),
+          trigger: body.trigger as AutomationTrigger,
+          conditions: (body.conditions ?? []) as AutomationCondition[],
+          actions: body.actions.map((action) => ({
+            id: action.id ?? randomUUID(),
+            type: (action.type ?? "notify") as AutomationAction["type"],
+            config: action.config ?? {},
+            ...(action.modelOverride ? { modelOverride: action.modelOverride } : {}),
+          })),
+          autonomyLevel:
+            body.autonomyLevel && inArrayValue(autonomyLevels, body.autonomyLevel)
+              ? body.autonomyLevel
+              : "approve",
+          allowAutoExternal: body.allowAutoExternal ?? false,
+          providerAccountId: body.providerAccountId,
+          modelOverride: body.modelOverride,
+        })
+        .returning();
+      return context.json(automation, 201);
+    })
+    .patch("/v1/automations/:id", automationBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const body = context.req.valid("json");
+      const statuses = ["draft", "suggested", "active", "paused"] as const;
+      const autonomyLevels = ["suggest", "approve", "auto"] as const;
+      const status = body.status && inArrayValue(statuses, body.status) ? body.status : undefined;
+      const autonomyLevel =
+        body.autonomyLevel && inArrayValue(autonomyLevels, body.autonomyLevel)
+          ? body.autonomyLevel
+          : undefined;
+      const [automation] = await database
+        .update(schema.automations)
+        .set({
+          ...(body.name ? { name: body.name.trim() } : {}),
+          ...(body.description !== undefined ? { description: body.description } : {}),
+          ...(status ? { status: status as AutomationStatus } : {}),
+          ...(body.trigger ? { trigger: body.trigger as AutomationTrigger } : {}),
+          ...(body.conditions ? { conditions: body.conditions as AutomationCondition[] } : {}),
+          ...(body.actions
+            ? {
+                actions: body.actions.map((action) => ({
+                  id: action.id ?? randomUUID(),
+                  type: (action.type ?? "notify") as AutomationAction["type"],
+                  config: action.config ?? {},
+                  ...(action.modelOverride ? { modelOverride: action.modelOverride } : {}),
+                })),
+              }
+            : {}),
+          ...(autonomyLevel ? { autonomyLevel: autonomyLevel as AutonomyLevel } : {}),
+          ...(body.allowAutoExternal !== undefined
+            ? { allowAutoExternal: body.allowAutoExternal }
+            : {}),
+          ...(body.providerAccountId !== undefined
+            ? { providerAccountId: body.providerAccountId || null }
+            : {}),
+          ...(body.modelOverride !== undefined
+            ? { modelOverride: body.modelOverride || null }
+            : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.automations.id, context.req.param("id")),
+            eq(schema.automations.userId, user.id),
+          ),
+        )
+        .returning();
+      if (!automation) return context.json({ error: "Automation not found" as const }, 404);
+      return context.json(automation);
+    })
+    .delete("/v1/automations/:id", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const deleted = await database
+        .delete(schema.automations)
+        .where(
+          and(
+            eq(schema.automations.id, context.req.param("id")),
+            eq(schema.automations.userId, user.id),
+          ),
+        )
+        .returning({ id: schema.automations.id });
+      if (!deleted.length) return context.json({ error: "Automation not found" as const }, 404);
+      return context.json({ deleted: true as const });
+    })
+    .post("/v1/automations/:id/run", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database || !enqueue) return context.json({ error: "Queue unavailable" as const }, 503);
+      const [automation] = await database
+        .select({ id: schema.automations.id })
+        .from(schema.automations)
+        .where(
+          and(
+            eq(schema.automations.id, context.req.param("id")),
+            eq(schema.automations.userId, user.id),
+          ),
+        )
+        .limit(1);
+      if (!automation) return context.json({ error: "Automation not found" as const }, 404);
+      const runId = randomUUID();
+      await database.insert(schema.automationRuns).values({
+        id: runId,
+        userId: user.id,
+        automationId: automation.id,
+        triggerType: "manual",
+      });
+      const jobId = await enqueue(JOBS.runAutomation, {
+        automationId: automation.id,
+        runId,
+        userId: user.id,
+      });
+      return context.json({ jobId, queued: true as const, runId }, 202);
+    })
+    .get("/v1/automation-runs", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.automationRuns)
+          .where(eq(schema.automationRuns.userId, user.id))
+          .orderBy(desc(schema.automationRuns.createdAt))
+          .limit(100),
+      );
+    })
+    .get("/v1/suggestions", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.automations)
+          .where(
+            and(eq(schema.automations.userId, user.id), eq(schema.automations.status, "suggested")),
+          )
+          .orderBy(desc(schema.automations.createdAt)),
+      );
+    })
+    .post("/v1/suggestions/:id/accept", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const [automation] = await database
+        .update(schema.automations)
+        .set({ status: "active", updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.automations.id, context.req.param("id")),
+            eq(schema.automations.userId, user.id),
+            eq(schema.automations.status, "suggested"),
+          ),
+        )
+        .returning();
+      if (!automation) return context.json({ error: "Suggestion not found" as const }, 404);
+      return context.json(automation);
+    })
+    .get("/v1/approvals", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.approvals)
+          .where(eq(schema.approvals.userId, user.id))
+          .orderBy(desc(schema.approvals.createdAt))
+          .limit(100),
+      );
+    })
+    .post("/v1/approvals/:id/approve", approvalBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database || !enqueue) return context.json({ error: "Queue unavailable" as const }, 503);
+      const [approval] = await database
+        .update(schema.approvals)
+        .set({
+          status: "approved",
+          editedPayload: context.req.valid("json").editedPayload,
+          decidedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.approvals.id, context.req.param("id")),
+            eq(schema.approvals.userId, user.id),
+            eq(schema.approvals.status, "pending"),
+            gt(schema.approvals.expiresAt, new Date()),
+          ),
+        )
+        .returning({ id: schema.approvals.id });
+      if (!approval) return context.json({ error: "Approval is unavailable or expired" }, 409);
+      const jobId = await enqueue(JOBS.executeApproval, {
+        approvalId: approval.id,
+        userId: user.id,
+      });
+      return context.json({ jobId, queued: true as const }, 202);
+    })
+    .post("/v1/approvals/:id/reject", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const [approval] = await database
+        .update(schema.approvals)
+        .set({ status: "rejected", decidedAt: new Date() })
+        .where(
+          and(
+            eq(schema.approvals.id, context.req.param("id")),
+            eq(schema.approvals.userId, user.id),
+            eq(schema.approvals.status, "pending"),
+          ),
+        )
+        .returning();
+      if (!approval) return context.json({ error: "Approval not found" as const }, 404);
+      return context.json(approval);
+    })
+    .get("/v1/mcp-servers", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select({
+            id: schema.mcpServers.id,
+            name: schema.mcpServers.name,
+            transport: schema.mcpServers.transport,
+            url: schema.mcpServers.url,
+            command: schema.mcpServers.command,
+            enabled: schema.mcpServers.enabled,
+            lastError: schema.mcpServers.lastError,
+          })
+          .from(schema.mcpServers)
+          .where(eq(schema.mcpServers.userId, user.id)),
+      );
+    })
+    .post("/v1/mcp-servers", mcpBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database || !credentialEncryptionKey) {
+        return context.json({ error: "Credential storage unavailable" as const }, 503);
+      }
+      const body = context.req.valid("json");
+      if (!body.name?.trim() || !body.transport) {
+        return context.json({ error: "MCP name and transport are required" }, 400);
+      }
+      const [server] = await database
+        .insert(schema.mcpServers)
+        .values({
+          id: randomUUID(),
+          userId: user.id,
+          name: body.name.trim(),
+          transport: body.transport,
+          url: body.url,
+          command: body.command,
+          enabled: body.enabled ?? true,
+          encryptedConfig: body.config
+            ? await encryptCredential(JSON.stringify(body.config), credentialEncryptionKey)
+            : undefined,
+        })
+        .returning({
+          id: schema.mcpServers.id,
+          name: schema.mcpServers.name,
+          transport: schema.mcpServers.transport,
+          url: schema.mcpServers.url,
+          command: schema.mcpServers.command,
+          enabled: schema.mcpServers.enabled,
+        });
+      return context.json(server, 201);
+    })
+    .delete("/v1/mcp-servers/:id", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const deleted = await database
+        .delete(schema.mcpServers)
+        .where(
+          and(
+            eq(schema.mcpServers.id, context.req.param("id")),
+            eq(schema.mcpServers.userId, user.id),
+          ),
+        )
+        .returning({ id: schema.mcpServers.id });
+      if (!deleted.length) return context.json({ error: "MCP server not found" as const }, 404);
+      return context.json({ deleted: true as const });
+    })
+    .get("/v1/plugins", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.plugins)
+          .where(eq(schema.plugins.userId, user.id))
+          .orderBy(asc(schema.plugins.name)),
+      );
+    })
+    .post("/v1/plugins", pluginBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const body = context.req.valid("json");
+      const command = body.slashCommand?.trim().replace(/^\//, "");
+      if (!body.name?.trim() || !command || !body.instructions?.trim()) {
+        return context.json(
+          { error: "Plugin name, slash command, and instructions are required" },
+          400,
+        );
+      }
+      const [plugin] = await database
+        .insert(schema.plugins)
+        .values({
+          id: randomUUID(),
+          userId: user.id,
+          name: body.name.trim(),
+          slashCommand: command,
+          description: body.description,
+          instructions: body.instructions.trim(),
+          enabled: body.enabled ?? true,
+        })
+        .returning();
+      return context.json(plugin, 201);
+    })
+    .delete("/v1/plugins/:id", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const deleted = await database
+        .delete(schema.plugins)
+        .where(
+          and(eq(schema.plugins.id, context.req.param("id")), eq(schema.plugins.userId, user.id)),
+        )
+        .returning({ id: schema.plugins.id });
+      if (!deleted.length) return context.json({ error: "Plugin not found" as const }, 404);
+      return context.json({ deleted: true as const });
+    })
+    .get("/v1/plans", async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      return context.json(
+        await database
+          .select()
+          .from(schema.planArtifacts)
+          .where(eq(schema.planArtifacts.userId, user.id))
+          .orderBy(desc(schema.planArtifacts.updatedAt)),
+      );
+    })
+    .post("/v1/plans/:id/fork", forkPlanBody, async (context) => {
+      const user = context.get("user");
+      if (!user) return context.json({ error: "Unauthorized" as const }, 401);
+      if (!database) return context.json({ error: "Database unavailable" as const }, 503);
+      const [plan] = await database
+        .select()
+        .from(schema.planArtifacts)
+        .where(
+          and(
+            eq(schema.planArtifacts.id, context.req.param("id")),
+            eq(schema.planArtifacts.userId, user.id),
+          ),
+        )
+        .limit(1);
+      if (!plan) return context.json({ error: "Plan not found" as const }, 404);
+      const body = context.req.valid("json");
+      const mode = body.mode === "plan" || body.mode === "auto" ? body.mode : "ask";
+      const sessionId = randomUUID();
+      await database.insert(schema.agentSessions).values({
+        id: sessionId,
+        userId: user.id,
+        title: body.title?.trim() || `Execute: ${plan.title}`,
+        kind: "chat",
+        backend: body.backend === "local" ? "local" : "hosted",
+        mode,
+        effort: body.effort ?? "medium",
+        providerAccountId: body.providerAccountId,
+        modelOverride: body.modelOverride,
+        enabledToolsets: ["items", "memory"],
+        parentSessionId: plan.sessionId,
+        sourcePlanId: plan.id,
+      });
+      await database.insert(schema.sessionEvents).values({
+        id: randomUUID(),
+        userId: user.id,
+        sessionId,
+        sequence: 1,
+        type: "message",
+        role: "user",
+        content: `Execute this approved plan:\n\n${plan.content}`,
+        payload: { sourcePlanId: plan.id },
+      });
+      return context.json({ sessionId }, 201);
     });
 
   app.notFound((context) => context.json({ error: "Not found" as const }, 404));

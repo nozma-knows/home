@@ -4,6 +4,11 @@ export const JOBS = {
   distillSession: "memory.distill-session",
   generateBriefing: "briefings.generate",
   generateScheduledBriefings: "briefings.generate-scheduled",
+  detectSuggestions: "automations.detect-suggestions",
+  evaluateAutomationEvent: "automations.evaluate-event",
+  executeApproval: "approvals.execute",
+  runAutomation: "automations.run",
+  runScheduledAutomations: "automations.run-scheduled",
   syncFeed: "feeds.sync",
   syncFeeds: "feeds.sync-all",
   syncConnection: "connections.sync",
@@ -40,5 +45,23 @@ export type GenerateBriefingJob = {
 
 export type SyncFeedJob = {
   feedId: string;
+  userId: string;
+};
+
+export type RunAutomationJob = {
+  automationId: string;
+  input?: Record<string, unknown>;
+  runId: string;
+  userId: string;
+};
+
+export type EvaluateAutomationEventJob = {
+  event: string;
+  itemId?: string;
+  userId: string;
+};
+
+export type ExecuteApprovalJob = {
+  approvalId: string;
   userId: string;
 };

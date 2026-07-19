@@ -4,6 +4,7 @@ import { Button, Card, cn } from "@home/ui";
 import {
   Bot,
   ChevronDown,
+  GitFork,
   LoaderCircle,
   Paperclip,
   Plus,
@@ -51,6 +52,13 @@ type PendingAttachment = {
   id: string;
   fileName: string;
 };
+type PlanArtifact = {
+  id: string;
+  sessionId: string;
+  title: string;
+  content: string;
+  updatedAt: string;
+};
 
 export function SessionsView() {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
@@ -62,6 +70,7 @@ export function SessionsView() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [plans, setPlans] = useState<PlanArtifact[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
 
@@ -70,10 +79,11 @@ export function SessionsView() {
   const modelOptions = activeAccount ? (models[activeAccount.provider] ?? []) : [];
 
   const loadSessions = useCallback(async () => {
-    const [sessionResponse, accountResponse, modelsResponse] = await Promise.all([
+    const [sessionResponse, accountResponse, modelsResponse, plansResponse] = await Promise.all([
       apiClient.v1.sessions.$get(),
       apiClient.v1["provider-accounts"].$get(),
       apiClient.v1.models.$get(),
+      apiClient.v1.plans.$get(),
     ]);
     if (!sessionResponse.ok || !accountResponse.ok || !modelsResponse.ok) {
       setError("Sessions could not be loaded");
@@ -84,6 +94,7 @@ export function SessionsView() {
     setAccounts((await accountResponse.json()) as ProviderAccount[]);
     const catalog = await modelsResponse.json();
     setModels(catalog.models);
+    if (plansResponse.ok) setPlans((await plansResponse.json()) as PlanArtifact[]);
     setActiveId((current) => current ?? nextSessions[0]?.id);
   }, []);
 
@@ -229,8 +240,30 @@ export function SessionsView() {
     if (fileInput.current) fileInput.current.value = "";
   }
 
+  async function forkPlan(plan: PlanArtifact) {
+    const response = await apiClient.v1.plans[":id"].fork.$post({
+      param: { id: plan.id },
+      json: {
+        title: `Execute: ${plan.title}`,
+        mode: "ask",
+        backend: "hosted",
+        providerAccountId: accounts[0]?.id,
+        modelOverride: accounts[0] ? models[accounts[0].provider]?.[0] : undefined,
+      },
+    });
+    if (response.ok) {
+      const result = await response.json();
+      await loadSessions();
+      setActiveId(result.sessionId);
+    }
+  }
+
   const transcript = useMemo(
-    () => events.filter((event) => event.type === "message" || event.type.startsWith("tool_")),
+    () =>
+      events.filter(
+        (event) =>
+          event.type === "message" || event.type === "plan" || event.type.startsWith("tool_"),
+      ),
     [events],
   );
 
@@ -270,6 +303,22 @@ export function SessionsView() {
               </p>
             </button>
           ))}
+          {plans.length ? (
+            <div className="mt-4 border-t border-white/[0.06] pt-3">
+              <p className="px-3 text-[9px] uppercase tracking-wide text-zinc-700">Plans</p>
+              {plans.slice(0, 8).map((plan) => (
+                <button
+                  className="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[11px] text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
+                  key={plan.id}
+                  onClick={() => void forkPlan(plan)}
+                  type="button"
+                >
+                  <GitFork className="size-3.5 shrink-0 text-violet-300" />
+                  <span className="truncate">{plan.title}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
       </Card>
 
@@ -353,6 +402,18 @@ export function SessionsView() {
                         {JSON.stringify(event.payload, null, 2)}
                       </pre>
                     </div>
+                  </div>
+                ) : event.type === "plan" ? (
+                  <div
+                    className="rounded-xl border border-violet-400/20 bg-violet-400/[0.04] p-4"
+                    key={event.id}
+                  >
+                    <div className="flex items-center gap-2 text-xs font-medium text-violet-300">
+                      <GitFork className="size-3.5" /> Plan artifact
+                    </div>
+                    <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-zinc-300">
+                      {event.content}
+                    </p>
                   </div>
                 ) : (
                   <div

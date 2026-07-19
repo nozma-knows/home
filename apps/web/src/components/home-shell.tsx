@@ -1,6 +1,6 @@
 "use client";
 
-import { Card, cn } from "@home/ui";
+import { cn } from "@home/ui";
 import {
   Bot,
   Brain,
@@ -10,14 +10,16 @@ import {
   Inbox,
   LogOut,
   Settings,
+  ShieldCheck,
   Sparkles,
   Workflow,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { authClient } from "@/lib/auth-client";
-
+import { ApprovalsView } from "./approvals-view";
 import { AuthPanel } from "./auth-panel";
+import { AutomationsView } from "./automations-view";
 import { BriefingView } from "./briefing-view";
 import { MemoryView } from "./memory-view";
 import { SessionsView } from "./sessions-view";
@@ -33,10 +35,18 @@ const navigation: ReadonlyArray<{
   { id: "triage", label: "Triage", icon: Inbox },
   { id: "sessions", label: "Sessions", icon: Bot },
   { id: "automations", label: "Automations", icon: Workflow },
+  { id: "approvals", label: "Approvals", icon: ShieldCheck },
   { id: "memory", label: "Memory", icon: Brain },
 ];
 
-type View = "briefing" | "triage" | "sessions" | "automations" | "memory" | "settings";
+type View =
+  | "briefing"
+  | "triage"
+  | "sessions"
+  | "automations"
+  | "approvals"
+  | "memory"
+  | "settings";
 
 export function HomeShell() {
   const session = authClient.useSession();
@@ -45,7 +55,7 @@ export function HomeShell() {
   useEffect(() => {
     const requestedView = new URLSearchParams(window.location.search).get("view");
     if (
-      ["briefing", "triage", "sessions", "automations", "memory", "settings"].includes(
+      ["briefing", "triage", "sessions", "automations", "approvals", "memory", "settings"].includes(
         requestedView ?? "",
       )
     ) {
@@ -156,28 +166,12 @@ export function HomeShell() {
       <section className="px-5 py-6 sm:px-8 lg:px-12 lg:py-10">
         {view === "triage" ? <TriageView /> : null}
         {view === "sessions" ? <SessionsView /> : null}
+        {view === "automations" ? <AutomationsView /> : null}
+        {view === "approvals" ? <ApprovalsView /> : null}
         {view === "memory" ? <MemoryView /> : null}
         {view === "settings" ? <SettingsView /> : null}
-        {view === "automations" ? <EmptySurface view={view} /> : null}
         {view === "briefing" ? <BriefingView firstName={firstName ?? "there"} /> : null}
       </section>
     </main>
-  );
-}
-
-function EmptySurface({ view }: { view: "automations" }) {
-  return (
-    <div className="mx-auto max-w-5xl">
-      <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-zinc-600">
-        Coming online
-      </p>
-      <h1 className="mt-2 text-2xl font-semibold capitalize tracking-tight sm:text-3xl">{view}</h1>
-      <Card className="mt-8 p-8">
-        <p className="max-w-lg text-sm leading-6 text-zinc-500">
-          This surface is part of the active build sequence. The navigation is already stable so
-          each capability can land without reshaping the shell.
-        </p>
-      </Card>
-    </div>
   );
 }

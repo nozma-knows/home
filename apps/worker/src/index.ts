@@ -6,11 +6,16 @@ import { createProviderModel, estimateCostUsd, findMemoryDuplicate, resolveModel
 import { decryptCredential, fetchFeed, getConnector } from "@home/connectors";
 import {
   type DistillSessionJob,
+  type EvaluateAutomationEventJob,
+  type ExecuteApprovalJob,
   type ExecuteItemActionJob,
   type GenerateBriefingJob,
   JOBS,
+  matchesConditions,
+  type RunAutomationJob,
   type RunSessionJob,
   rankTriageItem,
+  requiresApproval,
   type SyncConnectionJob,
   type SyncFeedJob,
 } from "@home/core";
@@ -89,7 +94,7 @@ await boss.work<SyncConnectionJob>(JOBS.syncConnection, async (jobs) => {
           isRead: item.isRead,
           provider: connection.provider,
         });
-        await database
+        const [storedItem] = await database
           .insert(schema.items)
           .values({
             id: crypto.randomUUID(),
@@ -129,7 +134,19 @@ await boss.work<SyncConnectionJob>(JOBS.syncConnection, async (jobs) => {
               raw: item.raw,
               updatedAt: new Date(),
             },
-          });
+          })
+          .returning({ id: schema.items.id });
+        if (storedItem) {
+          const minute = new Date().toISOString().slice(0, 16);
+          await boss.send(
+            JOBS.evaluateAutomationEvent,
+            { event: "item.created", itemId: storedItem.id, userId: connection.userId },
+            {
+              singletonKey: `${connection.id}:${item.externalId}:${minute}`,
+              singletonSeconds: 60,
+            },
+          );
+        }
       }
 
       await database
@@ -318,6 +335,27 @@ await boss.work<RunSessionJob>(JOBS.runSession, async (jobs) => {
             (event.role === "user" || event.role === "assistant") && Boolean(event.content),
         )
         .map((event) => ({ role: event.role, content: event.content }));
+      const lastUserMessage = [...events].reverse().find((event) => event.role === "user")?.content;
+      const slashCommand = lastUserMessage?.match(/^\/([a-z0-9_-]+)/i)?.[1];
+      if (slashCommand) {
+        const [plugin] = await database
+          .select({ name: schema.plugins.name, instructions: schema.plugins.instructions })
+          .from(schema.plugins)
+          .where(
+            and(
+              eq(schema.plugins.userId, session.userId),
+              eq(schema.plugins.slashCommand, slashCommand),
+              eq(schema.plugins.enabled, true),
+            ),
+          )
+          .limit(1);
+        if (plugin) {
+          conversation.unshift({
+            role: "user",
+            content: `Active skill: ${plugin.name}\nFollow these instructions for this run:\n${plugin.instructions}`,
+          });
+        }
+      }
       if (memories.length) {
         conversation.unshift({
           role: "user",
@@ -449,6 +487,27 @@ await boss.work<RunSessionJob>(JOBS.runSession, async (jobs) => {
         content: result.text || "I completed the run without a text response.",
         model: resolution.model,
       });
+      if (session.mode === "plan") {
+        const planId = crypto.randomUUID();
+        await database.insert(schema.planArtifacts).values({
+          id: planId,
+          userId: session.userId,
+          sessionId: session.id,
+          title: session.title,
+          content: result.text || "No plan content was produced.",
+        });
+        await database.insert(schema.sessionEvents).values({
+          id: crypto.randomUUID(),
+          userId: session.userId,
+          sessionId: session.id,
+          sequence: sequence + 1,
+          type: "plan",
+          role: "assistant",
+          content: result.text || "No plan content was produced.",
+          model: resolution.model,
+          payload: { planId },
+        });
+      }
       const inputTokens = result.totalUsage.inputTokens ?? 0;
       const outputTokens = result.totalUsage.outputTokens ?? 0;
       await database.insert(schema.usageLogs).values({
@@ -854,6 +913,389 @@ await boss.work(JOBS.generateScheduledBriefings, async () => {
   }
 });
 
+async function executeAutomationAction(input: {
+  action: { id: string; type: string; config: Record<string, unknown> };
+  automationRunId: string;
+  context: Record<string, unknown>;
+  userId: string;
+}) {
+  if (input.action.type === "create_memory") {
+    const content = String(
+      input.action.config.content ?? input.context.summary ?? input.context.title ?? "",
+    );
+    const kindValue = String(input.action.config.kind ?? "fact");
+    const kind = ["fact", "preference", "person", "project"].includes(kindValue)
+      ? (kindValue as "fact" | "preference" | "person" | "project")
+      : ("fact" as const);
+    if (!content) throw new Error("Memory action requires content");
+    const id = crypto.randomUUID();
+    await database.insert(schema.memories).values({
+      id,
+      userId: input.userId,
+      kind,
+      content,
+      source: "automation",
+      sourceId: input.automationRunId,
+      confidence: 0.85,
+    });
+    return { id, saved: true };
+  }
+
+  if (input.action.type === "connector_action") {
+    const itemId = String(input.action.config.itemId ?? input.context.itemId ?? "");
+    const action = String(input.action.config.action ?? "archive");
+    if (!itemId) throw new Error("Connector automation action requires an item");
+    const [item] = await database
+      .select({ id: schema.items.id })
+      .from(schema.items)
+      .where(and(eq(schema.items.id, itemId), eq(schema.items.userId, input.userId)))
+      .limit(1);
+    if (!item) throw new Error("Automation item was not found");
+    const requestId = crypto.randomUUID();
+    await database.insert(schema.itemActionRequests).values({
+      id: requestId,
+      userId: input.userId,
+      itemId,
+      action,
+      input: {
+        ...((input.action.config.input as Record<string, unknown> | undefined) ?? {}),
+        automationRunId: input.automationRunId,
+      },
+    });
+    await boss.send(JOBS.executeItemAction, { requestId, userId: input.userId });
+    return { queued: true, requestId };
+  }
+
+  if (input.action.type === "llm") {
+    return {
+      deferred: true,
+      instruction: String(input.action.config.instruction ?? "Process the automation context"),
+      note: "LLM step is recorded for the next agent session",
+    };
+  }
+
+  return {
+    notified: true,
+    message: String(
+      input.action.config.message ??
+        input.action.config.instruction ??
+        input.context.title ??
+        "Automation completed",
+    ),
+  };
+}
+
+await boss.work<RunAutomationJob>(JOBS.runAutomation, async (jobs) => {
+  for (const job of jobs) {
+    const [automation] = await database
+      .select()
+      .from(schema.automations)
+      .where(
+        and(
+          eq(schema.automations.id, job.data.automationId),
+          eq(schema.automations.userId, job.data.userId),
+        ),
+      )
+      .limit(1);
+    const [run] = await database
+      .select()
+      .from(schema.automationRuns)
+      .where(
+        and(
+          eq(schema.automationRuns.id, job.data.runId),
+          eq(schema.automationRuns.userId, job.data.userId),
+        ),
+      )
+      .limit(1);
+    if (!automation || !run || run.status === "completed") continue;
+    await database
+      .update(schema.automationRuns)
+      .set({ status: "running", startedAt: new Date(), error: null })
+      .where(eq(schema.automationRuns.id, run.id));
+
+    try {
+      const context = { ...run.input, ...(job.data.input ?? {}) };
+      if (context.itemId) {
+        const [item] = await database
+          .select()
+          .from(schema.items)
+          .where(
+            and(
+              eq(schema.items.id, String(context.itemId)),
+              eq(schema.items.userId, automation.userId),
+            ),
+          )
+          .limit(1);
+        if (item) {
+          Object.assign(context, {
+            provider: item.provider,
+            sender: item.participants[0],
+            title: item.title,
+            body: item.body,
+            isAssigned: item.isAssigned,
+            isDirectMention: item.isDirectMention,
+          });
+        }
+      }
+      if (!matchesConditions(context, automation.conditions)) {
+        await database
+          .update(schema.automationRuns)
+          .set({
+            status: "skipped",
+            stepOutputs: [{ matched: false, reason: "Conditions did not match" }],
+            completedAt: new Date(),
+          })
+          .where(eq(schema.automationRuns.id, run.id));
+        continue;
+      }
+
+      const stepOutputs: Array<Record<string, unknown>> = [];
+      let waiting = false;
+      for (const action of automation.actions) {
+        if (
+          requiresApproval({
+            actionType: action.type,
+            autonomyLevel: automation.autonomyLevel,
+            allowAutoExternal: automation.allowAutoExternal,
+          })
+        ) {
+          const approvalId = crypto.randomUUID();
+          await database.insert(schema.approvals).values({
+            id: approvalId,
+            userId: automation.userId,
+            automationRunId: run.id,
+            title: `${automation.name}: ${action.type.replaceAll("_", " ")}`,
+            description: automation.description,
+            actionType: action.type,
+            payload: { action, context },
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          });
+          stepOutputs.push({ actionId: action.id, approvalId, status: "waiting_for_approval" });
+          waiting = true;
+          continue;
+        }
+        const output = await executeAutomationAction({
+          action,
+          automationRunId: run.id,
+          context,
+          userId: automation.userId,
+        });
+        stepOutputs.push({ actionId: action.id, status: "completed", output });
+      }
+      await database
+        .update(schema.automationRuns)
+        .set({
+          status: waiting ? "waiting" : "completed",
+          stepOutputs,
+          completedAt: waiting ? null : new Date(),
+        })
+        .where(eq(schema.automationRuns.id, run.id));
+      await database
+        .update(schema.automations)
+        .set({ lastRunAt: new Date(), lastError: null, updatedAt: new Date() })
+        .where(eq(schema.automations.id, automation.id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Automation failed";
+      await database
+        .update(schema.automationRuns)
+        .set({ status: "failed", error: message, completedAt: new Date() })
+        .where(eq(schema.automationRuns.id, run.id));
+      await database
+        .update(schema.automations)
+        .set({ lastError: message, updatedAt: new Date() })
+        .where(eq(schema.automations.id, automation.id));
+      throw error;
+    }
+  }
+});
+
+await boss.work<ExecuteApprovalJob>(JOBS.executeApproval, async (jobs) => {
+  for (const job of jobs) {
+    const [approval] = await database
+      .select()
+      .from(schema.approvals)
+      .where(
+        and(
+          eq(schema.approvals.id, job.data.approvalId),
+          eq(schema.approvals.userId, job.data.userId),
+          eq(schema.approvals.status, "approved"),
+        ),
+      )
+      .limit(1);
+    if (!approval) continue;
+    const payload = approval.editedPayload ?? approval.payload;
+    const action = payload.action as
+      | { id: string; type: string; config: Record<string, unknown> }
+      | undefined;
+    const context = (payload.context as Record<string, unknown> | undefined) ?? {};
+    if (!action) throw new Error("Approval payload has no action");
+    const output = await executeAutomationAction({
+      action,
+      automationRunId: approval.automationRunId ?? approval.id,
+      context,
+      userId: approval.userId,
+    });
+    await database
+      .update(schema.approvals)
+      .set({ status: "executed", editedPayload: { ...payload, output }, decidedAt: new Date() })
+      .where(eq(schema.approvals.id, approval.id));
+    if (approval.automationRunId) {
+      const remaining = await database
+        .select({ id: schema.approvals.id })
+        .from(schema.approvals)
+        .where(
+          and(
+            eq(schema.approvals.automationRunId, approval.automationRunId),
+            eq(schema.approvals.status, "pending"),
+          ),
+        )
+        .limit(1);
+      if (!remaining.length) {
+        await database
+          .update(schema.automationRuns)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(schema.automationRuns.id, approval.automationRunId));
+      }
+    }
+  }
+});
+
+await boss.work<EvaluateAutomationEventJob>(JOBS.evaluateAutomationEvent, async (jobs) => {
+  for (const job of jobs) {
+    const automations = await database
+      .select()
+      .from(schema.automations)
+      .where(
+        and(
+          eq(schema.automations.userId, job.data.userId),
+          eq(schema.automations.status, "active"),
+          sql`${schema.automations.trigger}->>'type' = 'event'`,
+          sql`${schema.automations.trigger}->>'event' = ${job.data.event}`,
+        ),
+      );
+    for (const automation of automations) {
+      const runId = crypto.randomUUID();
+      const input = {
+        event: job.data.event,
+        ...(job.data.itemId ? { itemId: job.data.itemId } : {}),
+      };
+      await database.insert(schema.automationRuns).values({
+        id: runId,
+        userId: automation.userId,
+        automationId: automation.id,
+        triggerType: "event",
+        input,
+      });
+      await boss.send(JOBS.runAutomation, {
+        automationId: automation.id,
+        runId,
+        userId: automation.userId,
+        input,
+      });
+    }
+  }
+});
+
+function cronMatches(cron: string, date: Date, timeZone = "UTC") {
+  const [minute, hour, day, month, weekday] = cron.trim().split(/\s+/);
+  if (!minute || !hour || !day || !month || !weekday) return false;
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      minute: "2-digit",
+      hour: "2-digit",
+      hourCycle: "h23",
+      day: "2-digit",
+      month: "2-digit",
+      weekday: "short",
+      timeZone,
+    })
+      .formatToParts(date)
+      .map((part) => [part.type, part.value]),
+  );
+  const weekdayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(
+    parts.weekday ?? "",
+  );
+  const matches = (value: string, actual: number) => value === "*" || Number(value) === actual;
+  return (
+    matches(minute, Number(parts.minute)) &&
+    matches(hour, Number(parts.hour)) &&
+    matches(day, Number(parts.day)) &&
+    matches(month, Number(parts.month)) &&
+    matches(weekday, weekdayIndex)
+  );
+}
+
+await boss.work(JOBS.runScheduledAutomations, async () => {
+  const now = new Date();
+  const automations = await database
+    .select()
+    .from(schema.automations)
+    .where(
+      and(
+        eq(schema.automations.status, "active"),
+        sql`${schema.automations.trigger}->>'type' = 'schedule'`,
+      ),
+    );
+  for (const automation of automations) {
+    if (automation.trigger.type !== "schedule") continue;
+    if (!cronMatches(automation.trigger.cron, now, automation.trigger.timezone ?? "UTC")) continue;
+    const minute = now.toISOString().slice(0, 16);
+    const runId = crypto.randomUUID();
+    await database.insert(schema.automationRuns).values({
+      id: runId,
+      userId: automation.userId,
+      automationId: automation.id,
+      triggerType: "schedule",
+      input: { scheduledAt: now.toISOString() },
+    });
+    await boss.send(
+      JOBS.runAutomation,
+      { automationId: automation.id, runId, userId: automation.userId },
+      { singletonKey: `${automation.id}:${minute}`, singletonSeconds: 60 },
+    );
+  }
+});
+
+await boss.work(JOBS.detectSuggestions, async () => {
+  const patterns = await database
+    .select({
+      userId: schema.items.userId,
+      provider: schema.items.provider,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(schema.items)
+    .where(eq(schema.items.status, "archived"))
+    .groupBy(schema.items.userId, schema.items.provider)
+    .having(sql`count(*) >= 10`);
+  for (const pattern of patterns) {
+    const name = `Auto-archive routine ${pattern.provider} items`;
+    const [existing] = await database
+      .select({ id: schema.automations.id })
+      .from(schema.automations)
+      .where(and(eq(schema.automations.userId, pattern.userId), eq(schema.automations.name, name)))
+      .limit(1);
+    if (existing) continue;
+    await database.insert(schema.automations).values({
+      id: crypto.randomUUID(),
+      userId: pattern.userId,
+      name,
+      description: `Suggested after ${pattern.count} archived ${pattern.provider} items.`,
+      status: "suggested",
+      source: "pattern_detection",
+      trigger: { type: "event", event: "item.created", provider: pattern.provider },
+      conditions: [{ field: "provider", operator: "equals", value: pattern.provider }],
+      actions: [
+        {
+          id: crypto.randomUUID(),
+          type: "connector_action",
+          config: { action: "archive" },
+        },
+      ],
+      autonomyLevel: "approve",
+    });
+  }
+});
+
 await boss.work(JOBS.syncConnections, async () => {
   const activeConnections = await database
     .select({ id: schema.connections.id, userId: schema.connections.userId })
@@ -871,6 +1313,8 @@ await boss.work(JOBS.syncConnections, async () => {
 await boss.schedule(JOBS.syncConnections, "*/2 * * * *");
 await boss.schedule(JOBS.syncFeeds, "*/15 * * * *");
 await boss.schedule(JOBS.generateScheduledBriefings, "5 * * * *");
+await boss.schedule(JOBS.runScheduledAutomations, "* * * * *");
+await boss.schedule(JOBS.detectSuggestions, "30 3 * * *");
 console.log(`${workerName} started with connector sync workers`);
 
 let stopping = false;
