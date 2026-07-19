@@ -6,6 +6,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { apiClient } from "@/lib/api-client";
 
+import { AiSettings } from "./ai-settings";
+
 type Connector = {
   id: "gmail" | "slack" | "linear";
   displayName: string;
@@ -204,6 +206,7 @@ export function SettingsView() {
           })}
         </div>
       </section>
+      <AiSettings />
     </div>
   );
 }

@@ -15,6 +15,13 @@
       "when": 1784476245053,
       "tag": "0001_dark_bulldozer",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784476794797,
+      "tag": "0002_small_catseye",
+      "breakpoints": true
     }
   ]
 }

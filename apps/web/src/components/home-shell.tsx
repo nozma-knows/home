@@ -3,6 +3,7 @@
 import { Button, Card, cn } from "@home/ui";
 import {
   Bot,
+  Brain,
   BriefcaseBusiness,
   CheckCircle2,
   ChevronDown,
@@ -19,6 +20,8 @@ import { apiClient } from "@/lib/api-client";
 import { authClient } from "@/lib/auth-client";
 
 import { AuthPanel } from "./auth-panel";
+import { MemoryView } from "./memory-view";
+import { SessionsView } from "./sessions-view";
 import { SettingsView } from "./settings-view";
 import { TriageView } from "./triage-view";
 
@@ -31,9 +34,10 @@ const navigation: ReadonlyArray<{
   { id: "triage", label: "Triage", icon: Inbox },
   { id: "sessions", label: "Sessions", icon: Bot },
   { id: "automations", label: "Automations", icon: Workflow },
+  { id: "memory", label: "Memory", icon: Brain },
 ];
 
-type View = "briefing" | "triage" | "sessions" | "automations" | "settings";
+type View = "briefing" | "triage" | "sessions" | "automations" | "memory" | "settings";
 
 export function HomeShell() {
   const session = authClient.useSession();
@@ -43,7 +47,9 @@ export function HomeShell() {
   useEffect(() => {
     const requestedView = new URLSearchParams(window.location.search).get("view");
     if (
-      ["briefing", "triage", "sessions", "automations", "settings"].includes(requestedView ?? "")
+      ["briefing", "triage", "sessions", "automations", "memory", "settings"].includes(
+        requestedView ?? "",
+      )
     ) {
       setView(requestedView as View);
     }
@@ -166,8 +172,10 @@ export function HomeShell() {
 
       <section className="px-5 py-6 sm:px-8 lg:px-12 lg:py-10">
         {view === "triage" ? <TriageView /> : null}
+        {view === "sessions" ? <SessionsView /> : null}
+        {view === "memory" ? <MemoryView /> : null}
         {view === "settings" ? <SettingsView /> : null}
-        {view === "sessions" || view === "automations" ? <EmptySurface view={view} /> : null}
+        {view === "automations" ? <EmptySurface view={view} /> : null}
         {view === "briefing" ? (
           <>
             <header className="mx-auto flex max-w-5xl items-start justify-between gap-4">
@@ -266,7 +274,7 @@ export function HomeShell() {
   );
 }
 
-function EmptySurface({ view }: { view: "sessions" | "automations" }) {
+function EmptySurface({ view }: { view: "automations" }) {
   return (
     <div className="mx-auto max-w-5xl">
       <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-zinc-600">
