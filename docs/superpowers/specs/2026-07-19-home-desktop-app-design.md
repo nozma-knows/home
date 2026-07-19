@@ -7,7 +7,16 @@
 
 A personal command center: a desktop-first app that connects your LLM accounts and work tools (Slack, Gmail, Linear, and a growing list) so you can track work, meetings, and schedule in one place, complete work with AI assistance, and set up automations and suggestions — with a memory layer that learns about you over time.
 
-Multi-user by design (every row scoped to a user), but built first for a single power user.
+Multi-user by design (every row scoped to a user), with organization support: users belong to organizations through a `user_organizations` membership table. Built first for a single power user.
+
+## Users & organizations
+
+- **Auth:** BetterAuth with its **organization plugin** — provides `organizations`, `user_organizations` (membership with roles: `owner` | `admin` | `member`), and invitation flows out of the box.
+- **Scoping rules — what belongs to whom:**
+  - **Always user-scoped (personal):** Gmail/personal connections, memories, chat conversations, provider accounts (LLM keys), briefings, triage state. An org admin never sees a member's inbox or memories.
+  - **Org-scopable (optional `organizationId` alongside `userId`):** connections that are naturally shared (a Slack workspace, a Linear team), automations, and RSS feeds/news topics. A row with `organizationId` set is visible to org members per their role; without it, it's personal.
+  - Every table carries `userId` (the owner/actor); org-scopable tables add nullable `organizationId`. Query helpers in `packages/db` take a `scope` argument (`{ userId }` or `{ userId, organizationId }`) so access control stays structural.
+- **Day-one behavior:** everything defaults to personal scope. Org sharing of connections/automations is wired into the schema from the start (so no migration later) but its UI arrives with the Automations phase.
 
 ## Product surfaces (day one)
 
@@ -118,7 +127,13 @@ Adding a provider = one new folder implementing the interface. Nothing else chan
 
 **Credentials:** `provider_accounts` table with `credentialType: 'api_key' | 'oauth'`. API keys always work. Subscription OAuth (e.g. "Sign in with ChatGPT"; Anthropic's equivalent) is provider-dependent and terms-restricted — each provider adapter declares what it supports, and adding subscription OAuth when a provider opens it officially is a new auth adapter, not a rearchitecture. **Implementation note: verify each provider's current OAuth stance at build time; this moved fast through 2025.**
 
-**Model registry:** users assign models per purpose — chat defaults to a frontier model; background work (distillation, urgency scoring, briefing drafts, classification) defaults to a cheap fast model.
+**Model selection (`ModelResolver`):** one function every LLM call site goes through — `resolveModel(purpose, context)` — implementing a customizable cascade, most specific wins:
+
+1. **Call-site pin** — e.g. the model picker on a chat conversation, or `modelOverride` on an automation or individual automation step
+2. **Per-purpose preference** — user-configured in Settings: `chat`, `briefing`, `distillation`, `urgency_scoring`, `classification`, `automation_default`, each mapped to a model from their connected accounts
+3. **Tier default** — purposes declare a tier (`frontier` | `fast`); the user sets one model per tier as the fallback
+
+Preferences live in a `model_preferences` table (user-scoped; purpose → provider account + model). Resolution is pure logic in `packages/ai` — trivially unit-testable, and new purposes or levels are additive. If a resolved model's provider account is missing/broken, the resolver falls back down the cascade and the call is logged with the substitution so it's visible in usage tracking.
 
 **Usage tracking:** every LLM call logged (provider, model, tokens, computed cost, purpose). The log powers the usage dashboard: spend by provider/purpose/day for API-key accounts; token/rate-window consumption for subscription accounts (which have no per-token price).
 
@@ -137,8 +152,10 @@ Adding a provider = one new folder implementing the interface. Nothing else chan
 **Model:** automation = trigger + conditions + action chain, stored as data.
 
 - **Triggers:** schedule (cron via pg-boss schedules), event (`item.created` with filters, webhook events), manual.
-- **Conditions:** deterministic filters (sender, keyword, label, project) and/or an LLM predicate ("is this urgent?") on the cheap model.
+- **Conditions:** deterministic filters (sender, keyword, label, project) and/or an LLM predicate ("is this urgent?").
 - **Actions:** connector actions, internal actions (create task, file memory, notify), LLM steps (draft/summarize/decide) whose output feeds the next step.
+
+**Model choice per automation:** an automation can set `modelOverride` for all its LLM work, and any individual LLM step or predicate can override that again — both feed level 1 of the `ModelResolver` cascade. Unset means the user's `automation_default` purpose preference applies. So "draft replies with the frontier model, but classify with the cheap one" is per-step configuration, not code.
 
 Every run writes `automation_runs`: inputs, per-step outputs, outcome — full auditability of *why* something happened.
 
@@ -156,7 +173,7 @@ Every run writes `automation_runs`: inputs, per-step outputs, outcome — full a
 ## Security
 
 - All third-party secrets (connector tokens, LLM keys) encrypted at rest: AES-256-GCM, key in Railway env. Documented upgrade path to per-user derived keys if the app ever hosts users who shouldn't trust the server operator.
-- Every table row scoped by `userId`. Every `packages/db` query helper requires `userId` as an argument — cross-user leaks are structurally hard, not just policy.
+- Every table row scoped by `userId` (org-scopable tables additionally by `organizationId`). Every `packages/db` query helper requires a scope argument — cross-user/cross-org leaks are structurally hard, not just policy. Org-shared rows are checked against `user_organizations` membership and role.
 - Every API router behind BetterAuth session middleware. Cross-subdomain cookies (`app.` / `api.`) configured in Phase 1.
 - Webhook endpoints verify provider signatures (Slack signing secret, Linear HMAC). Webhook handlers only enqueue jobs and return 200 — fast and failure-isolated.
 - LLM calls only ever receive data already scoped to the requesting user.
@@ -177,7 +194,7 @@ Every run writes `automation_runs`: inputs, per-step outputs, outcome — full a
 
 ## Build phases (each independently shippable)
 
-1. **Foundation** — monorepo scaffold; Postgres + Drizzle; BetterAuth across `app.`/`api.` subdomains (cookies/CORS proven end-to-end); skeleton of all three services deployed to Railway.
+1. **Foundation** — monorepo scaffold; Postgres + Drizzle; BetterAuth (with organization plugin: orgs, `user_organizations`, invites) across `app.`/`api.` subdomains, cookies/CORS proven end-to-end; skeleton of all three services deployed to Railway.
 2. **Connectors + triage** — Gmail/Slack/Linear sync into `items`; triage feed UI; manual actions (reply, archive, snooze).
 3. **AI core** — provider accounts (API keys), chat hub with tools, memory tables + distillation, usage logging.
 4. **Briefing** — briefing job + UI; RSS connector; news topics.
@@ -192,6 +209,6 @@ Sidebar app: Briefing / Triage / Chat / Automations / Approvals / Memory / Setti
 
 - Google Calendar, Drive, GitHub, PostHog, Vercel, Metabase connectors (framework makes each a bounded add)
 - Expo/React Native mobile app (PWA first)
-- Standalone workspace/organization features beyond per-user scoping
+- Org-sharing UI for connections/automations (schema supports it day one; UI lands with the Automations phase)
 - Subscription OAuth for LLM providers where not officially supported
 - Inngest/Temporal (only if automations outgrow pg-boss)
