@@ -78,6 +78,17 @@ export const slackConnector: Connector = {
       }),
     });
   },
+  refreshAccessToken({ clientId, clientSecret, refreshToken }) {
+    return requestOAuthTokens({
+      endpoint: "https://slack.com/api/oauth.v2.access",
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    });
+  },
   async getIdentity(accessToken) {
     const identity = await slackRequest<
       SlackResponse & { team?: string; team_id?: string; user?: string; user_id?: string }

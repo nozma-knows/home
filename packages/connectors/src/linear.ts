@@ -80,6 +80,17 @@ export const linearConnector: Connector = {
       }),
     });
   },
+  refreshAccessToken({ clientId, clientSecret, refreshToken }) {
+    return requestOAuthTokens({
+      endpoint: "https://api.linear.app/oauth/token",
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    });
+  },
   async getIdentity(accessToken) {
     const data = await linearGraphQL<{ viewer: { id: string; email: string; name: string } }>(
       accessToken,
